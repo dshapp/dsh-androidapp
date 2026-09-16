@@ -1,0 +1,349 @@
+package ai.deepseek.dshphone.net
+
+import ai.deepseek.dshphone.model.AgentPresetListValue
+import ai.deepseek.dshphone.model.CommandDescriptor
+import ai.deepseek.dshphone.model.FileReferenceItem
+import ai.deepseek.dshphone.model.GoalCreateValue
+import ai.deepseek.dshphone.model.GoalRef
+import ai.deepseek.dshphone.model.GoalViewValue
+import ai.deepseek.dshphone.model.HistoryEntry
+import ai.deepseek.dshphone.model.ModelCatalogValue
+import ai.deepseek.dshphone.model.SessionAddress
+import ai.deepseek.dshphone.model.SessionAttachmentValue
+import ai.deepseek.dshphone.model.SessionCreateValue
+import ai.deepseek.dshphone.model.SessionForkValue
+import ai.deepseek.dshphone.model.SessionHistoryValue
+import ai.deepseek.dshphone.model.SessionListValue
+import ai.deepseek.dshphone.model.SessionModelsValue
+import ai.deepseek.dshphone.model.SessionPageValue
+import ai.deepseek.dshphone.model.SessionReferenceItem
+import ai.deepseek.dshphone.model.SessionSearchValue
+import ai.deepseek.dshphone.model.SessionSelectModelValue
+import ai.deepseek.dshphone.model.SkillListValue
+import ai.deepseek.dshphone.model.SubagentAddress
+import ai.deepseek.dshphone.model.SubagentListEntry
+import ai.deepseek.dshphone.model.SubagentListValue
+import ai.deepseek.dshphone.model.SubagentMode
+import ai.deepseek.dshphone.model.WorkspaceFileTextValue
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+
+/** prompt 的一块内容。 */
+sealed interface PromptContentPart {
+    data class Text(val text: String) : PromptContentPart
+    data class Image(val mediaType: String, val data: String, val name: String?) : PromptContentPart
+    data class File(val receiptId: String) : PromptContentPart
+}
+
+private fun PromptContentPart.toJson(): JsonElement = when (this) {
+    is PromptContentPart.Text -> buildJsonObject { put("type", "text"); put("text", text) }
+    is PromptContentPart.Image -> buildJsonObject {
+        put("type", "image"); put("mediaType", mediaType); put("data", data)
+        name?.let { put("name", it) }
+    }
+    is PromptContentPart.File -> buildJsonObject { put("type", "file"); put("receiptId", receiptId) }
+}
+
+private fun SessionAddress.toJson(): JsonElement = when (this) {
+    is SessionAddress.Session -> buildJsonObject { put("kind", "session"); put("sessionId", sessionId) }
+    is SessionAddress.Subagent -> buildJsonObject {
+        put("kind", "subagent")
+        put("parentSessionId", address.parentSessionId)
+        put("childSessionId", address.childSessionId)
+        put("mode", address.mode.wire)
+    }
+}
+
+/** 队列条目的操作。 */
+sealed interface QueueAction {
+    data class Edit(val text: String) : QueueAction
+    data object Remove : QueueAction
+    data object Steer : QueueAction
+}
+
+private fun QueueAction.toJson(): JsonElement = when (this) {
+    is QueueAction.Edit -> buildJsonObject {
+        put("kind", "edit")
+        put("content", buildJsonArray { add(buildJsonObject { put("type", "text"); put("text", text) }) })
+    }
+    QueueAction.Remove -> buildJsonObject { put("kind", "remove") }
+    QueueAction.Steer -> buildJsonObject { put("kind", "steer") }
+}
+
+private fun request(block: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit): JsonElement =
+    buildJsonObject { put("request", buildJsonObject(block)) }
+
+// —— session ——————————————————————————————————————————————————
+
+suspend fun ApiClient.sessionList(): SessionListValue =
+    call("session/list", buildJsonObject { put("_request", JsonObject(emptyMap())) })
+        .decodeOrNull<SessionListValue>() ?: SessionListValue()
+
+suspend fun ApiClient.sessionSearch(query: String): SessionSearchValue =
+    call("session/search", request { put("query", query) })
+        .decodeOrNull<SessionSearchValue>() ?: SessionSearchValue()
+
+suspend fun ApiClient.sessionCreate(workspaceId: WorkspaceId? = null): SessionCreateValue =
+    call("session/create", request { workspaceId?.let { put("workspaceId", it) } })
+        .decodeOrNull<SessionCreateValue>() ?: throw internalError("session/create returned no value")
+
+suspend fun ApiClient.sessionPage(
+    address: SessionAddress,
+    throughSeq: Int,
+    beforeSeq: Int? = null,
+    maxMessages: Int? = null,
+): SessionPageValue = call(
+    "session/page",
+    request {
+        put("address", address.toJson())
+        put("throughSeq", throughSeq)
+        beforeSeq?.let { put("beforeSeq", it) }
+        maxMessages?.let { put("maxMessages", it) }
+    },
+).decodeOrNull<SessionPageValue>() ?: SessionPageValue()
+
+suspend fun ApiClient.sessionHistory(
+    sessionId: SessionId,
+    throughSeq: Int,
+    beforeSeq: Int? = null,
+    maxMessages: Int? = 50,
+): SessionHistoryValue {
+    val page = sessionPage(SessionAddress.Session(sessionId), throughSeq, beforeSeq, maxMessages)
+    return SessionHistoryValue(page.records, page.hasMore, null)
+}
+
+suspend fun ApiClient.subagentHistory(
+    address: SubagentAddress,
+    throughSeq: Int,
+    beforeSeq: Int? = null,
+    maxMessages: Int? = 50,
+): SessionHistoryValue {
+    val page = sessionPage(SessionAddress.Subagent(address), throughSeq, beforeSeq, maxMessages)
+    return SessionHistoryValue(page.records, page.hasMore, null)
+}
+
+suspend fun ApiClient.sessionModels(): SessionModelsValue {
+    val catalog = call("session/modelCatalog", JsonObject(emptyMap()))
+        .decodeOrNull<ModelCatalogValue>() ?: throw internalError("model catalog unavailable")
+    return SessionModelsValue(
+        current = catalog.defaultSelection,
+        routable = catalog.routableProviders.contains(catalog.defaultSelection.provider),
+        groups = catalog.groups,
+        failures = catalog.failures ?: emptyList(),
+    )
+}
+
+suspend fun ApiClient.sessionSelectModel(
+    sessionId: SessionId,
+    provider: String,
+    model: String,
+    reasoningEffort: String?,
+): SessionSelectModelValue = call(
+    "session/selectModel",
+    request {
+        put("sessionId", sessionId)
+        put("provider", provider)
+        put("model", model)
+        reasoningEffort?.let { put("reasoningEffort", it) }
+    },
+).decodeOrNull<SessionSelectModelValue>() ?: throw internalError("selectModel returned no value")
+
+suspend fun ApiClient.sessionRename(sessionId: SessionId, title: String) {
+    call("session/rename", request { put("sessionId", sessionId); put("title", title) })
+}
+
+suspend fun ApiClient.sessionFork(sessionId: SessionId, atSeq: Int? = null): SessionForkValue =
+    call("session/fork", request { put("sessionId", sessionId); atSeq?.let { put("atSeq", it) } })
+        .decodeOrNull<SessionForkValue>() ?: throw internalError("fork returned no value")
+
+suspend fun ApiClient.sessionPrompt(
+    sessionId: SessionId,
+    mode: String,
+    content: List<PromptContentPart>,
+    clientTimeZone: String?,
+    requestId: String,
+): Boolean {
+    val value = call(
+        "session/prompt",
+        request {
+            put("requestId", requestId)
+            put("sessionId", sessionId)
+            put("mode", mode)
+            put("content", JsonArray(content.map { it.toJson() }))
+            clientTimeZone?.let { put("clientTimeZone", it) }
+        },
+    )
+    return value["accepted"].bool ?: true
+}
+
+suspend fun ApiClient.sessionCancel(sessionId: SessionId) {
+    call("session/cancel", request { put("sessionId", sessionId) })
+}
+
+suspend fun ApiClient.sessionUpdateQueue(sessionId: SessionId, itemId: MessageId, action: QueueAction) {
+    call(
+        "session/updateQueue",
+        request { put("sessionId", sessionId); put("itemId", itemId); put("action", action.toJson()) },
+    )
+}
+
+suspend fun ApiClient.sessionAttachment(sessionId: SessionId, attachmentId: AttachmentId): SessionAttachmentValue =
+    call("session/attachment", request { put("sessionId", sessionId); put("attachmentId", attachmentId) })
+        .decodeOrNull<SessionAttachmentValue>() ?: throw internalError("attachment unavailable")
+
+suspend fun ApiClient.workspaceArchiveSession(sessionId: SessionId) {
+    call("workspace/archiveSession", request { put("sessionId", sessionId) })
+}
+
+suspend fun ApiClient.hostOpenPath(path: String) {
+    call("session/openWorkspacePath", request { put("path", path) })
+}
+
+suspend fun ApiClient.workspaceFileRead(sessionId: SessionId, path: String, offset: Int): WorkspaceFileTextValue =
+    call(
+        "workspaceFiles/read",
+        buildJsonObject {
+            put("workspaceFileScopeId", sessionId)
+            put("path", path)
+            put("range", buildJsonObject { put("offset", offset) })
+        },
+    ).decodeOrNull<WorkspaceFileTextValue>() ?: throw internalError("file read failed")
+
+// —— commands / skills ————————————————————————————————————————
+
+suspend fun ApiClient.commandsList(sessionId: SessionId): List<CommandDescriptor> =
+    (call("commands/list", buildJsonObject { put("agentId", sessionId) }).arr ?: emptyList())
+        .mapNotNull { it.decodeOrNull<CommandDescriptor>() }
+
+suspend fun ApiClient.commandsExecute(sessionId: SessionId, line: String) {
+    call(
+        "commands/execute",
+        buildJsonObject {
+            put("agentId", sessionId)
+            put("line", line)
+            put("submittedAttachments", JsonArray(emptyList()))
+        },
+    )
+}
+
+suspend fun ApiClient.sessionSelectPermission(sessionId: SessionId, presetId: String) {
+    commandsExecute(sessionId, "/permission $presetId")
+}
+
+suspend fun ApiClient.skillList(sessionId: SessionId): SkillListValue =
+    call("skills/list", request { put("sessionId", sessionId) })
+        .decodeOrNull<SkillListValue>() ?: SkillListValue()
+
+// —— 引用候选 ——————————————————————————————————————————————————
+
+suspend fun ApiClient.fileReferencesList(sessionId: SessionId, query: String): List<FileReferenceItem> =
+    (call("fileReferences/list", buildJsonObject { put("agentId", sessionId); put("query", query) }).arr
+        ?: emptyList()).mapNotNull { it.decodeOrNull<FileReferenceItem>() }
+
+suspend fun ApiClient.sessionReferenceCandidates(sessionId: SessionId, query: String): List<SessionReferenceItem> =
+    (call(
+        "sessionReferenceResolver/candidates",
+        buildJsonObject { put("agentId", sessionId); put("query", query) },
+    ).arr ?: emptyList()).mapNotNull { it.decodeOrNull<SessionReferenceItem>() }
+
+// —— agent 预设 ————————————————————————————————————————————————
+
+suspend fun ApiClient.agentPresetList(): AgentPresetListValue =
+    call("agentPresets/list", JsonObject(emptyMap()))
+        .decodeOrNull<AgentPresetListValue>() ?: AgentPresetListValue()
+
+suspend fun ApiClient.agentPresetSelect(sessionId: SessionId, agentPreset: String) {
+    call("agentPresets/select", buildJsonObject { put("agentId", sessionId); put("agentPreset", agentPreset) })
+}
+
+// —— 目标 ——————————————————————————————————————————————————————
+
+suspend fun ApiClient.goalCreate(sessionId: SessionId, objective: String, maxGoalRounds: Int?): GoalRef =
+    call(
+        "goals/create",
+        buildJsonObject {
+            put("agentId", sessionId)
+            put("request", buildJsonObject {
+                put("objective", objective)
+                maxGoalRounds?.let { put("maxGoalRounds", it) }
+            })
+        },
+    ).decodeOrNull<GoalCreateValue>()?.ref ?: throw internalError("goal create failed")
+
+private fun goalRefArgs(sessionId: SessionId, ref: GoalRef) = buildJsonObject {
+    put("agentId", sessionId)
+    put("ref", buildJsonObject { put("id", ref.id); put("revision", ref.revision) })
+}
+
+suspend fun ApiClient.goalClear(sessionId: SessionId, ref: GoalRef) {
+    call("goals/clear", goalRefArgs(sessionId, ref))
+}
+
+suspend fun ApiClient.goalPause(sessionId: SessionId, ref: GoalRef) {
+    call("goals/pause", goalRefArgs(sessionId, ref))
+}
+
+suspend fun ApiClient.goalResume(sessionId: SessionId, ref: GoalRef) {
+    call("goals/resume", goalRefArgs(sessionId, ref))
+}
+
+suspend fun ApiClient.goalEdit(sessionId: SessionId, ref: GoalRef, objective: String) {
+    call(
+        "goals/edit",
+        buildJsonObject {
+            put("agentId", sessionId)
+            put("ref", buildJsonObject { put("id", ref.id); put("revision", ref.revision) })
+            put("request", buildJsonObject { put("objective", objective) })
+        },
+    ).decodeOrNull<GoalViewValue>()
+}
+
+// —— 子智能体 ————————————————————————————————————————————————
+
+suspend fun ApiClient.subagentList(parentSessionId: SessionId): SubagentListValue {
+    val value = call("subagents/list", buildJsonObject { put("parentSessionId", parentSessionId) })
+    val entries = (value["entries"].arr ?: emptyList()).mapNotNull { entry ->
+        val id = entry["id"].str ?: return@mapNotNull null
+        when (entry["kind"].str) {
+            "child" -> SubagentListEntry(
+                sessionId = id,
+                isChild = true,
+                mode = if (entry["mode"].str == "continuable") SubagentMode.CONTINUABLE else SubagentMode.ONE_SHOT,
+                running = entry["activity"].str == "running",
+                hasChildren = entry["hasChildren"].bool ?: false,
+                label = entry["label"].str,
+            )
+            "diagnostic" -> SubagentListEntry(id, isChild = false, reason = entry["reason"].str)
+            else -> null
+        }
+    }
+    return SubagentListValue(entries, value["parentAvailable"].bool ?: false)
+}
+
+suspend fun ApiClient.subagentPrompt(address: SubagentAddress, text: String, clientTimeZone: String?) {
+    call(
+        "subagents/prompt",
+        request {
+            put("parentSessionId", address.parentSessionId)
+            put("childSessionId", address.childSessionId)
+            put("mode", address.mode.wire)
+            put("content", buildJsonArray { add(buildJsonObject { put("type", "text"); put("text", text) }) })
+            clientTimeZone?.let { put("clientTimeZone", it) }
+        },
+    )
+}
+
+suspend fun ApiClient.subagentInterrupt(address: SubagentAddress) {
+    call(
+        "subagents/interruptByParent",
+        buildJsonObject {
+            put("childSessionId", address.childSessionId)
+            put("parentSessionId", address.parentSessionId)
+            put("mode", address.mode.wire)
+        },
+    )
+}

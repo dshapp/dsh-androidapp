@@ -1,0 +1,703 @@
+package ai.deepseek.dshphone.ui.screen
+
+import ai.deepseek.dshphone.i18n.Strings
+import ai.deepseek.dshphone.model.*
+import ai.deepseek.dshphone.net.SessionId
+import ai.deepseek.dshphone.net.dbl
+import ai.deepseek.dshphone.net.get
+import ai.deepseek.dshphone.net.obj
+import ai.deepseek.dshphone.state.*
+import ai.deepseek.dshphone.ui.theme.Dimens
+import android.net.Uri
+import android.util.Base64
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.*
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
+import java.io.File
+
+/**
+ * 输入区：待办 → 目标 → 队列 → 候选 → 输入卡片（正文 + 一行控制）。
+ * 与 Mac/iOS 的 composer dock 同序、同主机动作。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ComposerBar(
+    model: PhoneModel,
+    sessionId: SessionId,
+    onSubmitted: (SessionId) -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val store = model.sessions[sessionId]
+    val haptics = LocalHapticFeedback.current
+    var draft by remember(sessionId) { mutableStateOf(model.draft(sessionId)) }
+    var attachments by remember(sessionId) { mutableStateOf<List<PhoneAttachment>>(emptyList()) }
+    var suggestions by remember { mutableStateOf<List<PhoneSuggestion>>(emptyList()) }
+    var attachMenu by remember { mutableStateOf(false) }
+    var permissionMenu by remember { mutableStateOf(false) }
+    var modelPicker by remember { mutableStateOf(false) }
+    var contextSheet by remember { mutableStateOf(false) }
+    var pendingFullAccess by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(sessionId) { model.loadModels(sessionId) }
+
+    val photoPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(4)
+    ) { uris: List<Uri> ->
+        uris.forEach { uri ->
+            loadImageAttachment(context, uri)?.let { attachments = attachments + it }
+        }
+    }
+    val filePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris: List<Uri> ->
+        uris.forEach { uri ->
+            loadFileAttachment(context, uri)?.let { attachments = attachments + it }
+        }
+    }
+
+    fun refreshSuggestions(value: String) {
+        val token = TriggerToken.parse(value)
+        if (token == null) {
+            suggestions = emptyList()
+            return
+        }
+        scope.launch {
+            val items = model.suggestions(token, sessionId)
+            if (TriggerToken.parse(draft) == token) suggestions = items
+        }
+    }
+
+    val rejection = if (attachments.isEmpty()) null else model.attachmentRejection(attachments, sessionId)
+    val takeover = store?.subagentAddress?.let {
+        if (it.mode == SubagentMode.CONTINUABLE) Strings.subagentComposer else Strings.subagentReadOnly
+    }
+    val sendDisabled = (draft.isBlank() && attachments.isEmpty()) || rejection != null
+
+    fun send() {
+        if (rejection != null) return
+        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        val address = store?.subagentAddress
+        if (address != null) {
+            if (address.mode != SubagentMode.CONTINUABLE) return
+            val text = draft
+            draft = ""
+            model.setDraft("", sessionId)
+            scope.launch { model.sendToSubagent(text, sessionId) }
+            return
+        }
+        val text = draft
+        val files = attachments
+        draft = ""
+        attachments = emptyList()
+        suggestions = emptyList()
+        model.setDraft("", sessionId)
+        scope.launch { model.send(text, sessionId, files) }
+        onSubmitted(sessionId)
+    }
+
+    // 外围与转写区同底色，只有内部输入卡片自己有底色（对齐 iOS）。
+    Surface(
+        color = MaterialTheme.colorScheme.background,
+        modifier = Modifier.imePadding().navigationBarsPadding(),
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = Dimens.columnInset, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            TodoStrip(store)
+            GoalBar(model, sessionId, store)
+            if (store != null && store.queue.isNotEmpty()) QueueStrip(model, sessionId, store)
+            if (suggestions.isNotEmpty()) {
+                SuggestionList(suggestions) { suggestion ->
+                    val token = TriggerToken.parse(draft)
+                    if (token != null) {
+                        draft = draft.replaceRange(token.start, token.end, suggestion.insert)
+                        model.setDraft(draft, sessionId)
+                    }
+                    suggestions = emptyList()
+                }
+            }
+            takeover?.let { InfoLine(Icons.Default.Group, it, MaterialTheme.colorScheme.onSurfaceVariant) }
+            rejection?.let { InfoLine(Icons.Default.WarningAmber, it, Color(0xFFE08600)) }
+            store?.historyError?.message?.let {
+                InfoLine(Icons.Default.ErrorOutline, it, MaterialTheme.colorScheme.error)
+            }
+            if (attachments.isNotEmpty()) {
+                AttachmentStrip(attachments) { id -> attachments = attachments.filterNot { it.id == id } }
+            }
+
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(22.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                BasicComposerField(
+                    value = draft,
+                    onValueChange = {
+                        draft = it
+                        model.setDraft(it, sessionId)
+                        refreshSuggestions(it)
+                    },
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { draft = "/"; refreshSuggestions("/") }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.Add, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Box {
+                        IconButton(onClick = { attachMenu = true }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Default.AttachFile, null, Modifier.size(18.dp),
+                                MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        DropdownMenu(attachMenu, { attachMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text(Strings.pickPhoto) },
+                                leadingIcon = { Icon(Icons.Default.Image, null) },
+                                onClick = {
+                                    attachMenu = false
+                                    photoPicker.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                    )
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(Strings.pickFile) },
+                                leadingIcon = { Icon(Icons.Default.InsertDriveFile, null) },
+                                onClick = { attachMenu = false; filePicker.launch(arrayOf("*/*")) },
+                            )
+                        }
+                    }
+                    Row(
+                        Modifier
+                            .weight(1f)
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box {
+                            Chip(
+                                store?.permissions?.currentOption?.let { permissionTitle(it.value, it.name) }
+                                    ?: Strings.permissions,
+                                warn = store?.permissions?.currentValue == "danger-full-access",
+                            ) { permissionMenu = true }
+                            DropdownMenu(permissionMenu, { permissionMenu = false }) {
+                                store?.permissions?.selectableOptions?.forEach { option ->
+                                    DropdownMenuItem(
+                                        text = { Text(permissionTitle(option.value, option.name)) },
+                                        onClick = {
+                                            permissionMenu = false
+                                            if (option.value == "danger-full-access") {
+                                                pendingFullAccess = option.value
+                                            } else {
+                                                model.selectPermission(option.value, sessionId)
+                                            }
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                        if (store?.planModeTarget == true) {
+                            Row(
+                                Modifier
+                                    .clip(CircleShape)
+                                    .background(Color(0x22E08600))
+                                    .clickable { model.setPlanMode(false, sessionId) }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                            ) {
+                                Text(Strings.planMode, style = MaterialTheme.typography.labelLarge,
+                                    color = Color(0xFFE08600))
+                                Icon(Icons.Default.Close, null, Modifier.size(12.dp), Color(0xFFE08600))
+                            }
+                        }
+                        Chip(store?.modelDirectory?.current?.model ?: Strings.model) { modelPicker = true }
+                    }
+                    store?.contextOccupancy?.let { occupancy ->
+                        ContextRing(occupancy.percent) { contextSheet = true }
+                    }
+                    if (store?.running == true && draft.isBlank()) {
+                        IconButton(
+                            onClick = {
+                                if (store.subagentAddress != null) model.interruptSubagent(sessionId)
+                                else model.stop(sessionId)
+                            },
+                            modifier = Modifier.size(36.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.Stop, Strings.stop,
+                                Modifier
+                                    .size(24.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.error)
+                                    .padding(4.dp),
+                                tint = MaterialTheme.colorScheme.onError,
+                            )
+                        }
+                    } else {
+                        IconButton(
+                            onClick = {
+                                if (store?.running == true) {
+                                    val text = draft
+                                    draft = ""
+                                    scope.launch { model.steer(text, sessionId) }
+                                } else send()
+                            },
+                            enabled = !sendDisabled,
+                            modifier = Modifier.size(36.dp),
+                        ) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.Send, Strings.send,
+                                Modifier.size(20.dp),
+                                tint = if (sendDisabled) MaterialTheme.colorScheme.outline
+                                else MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (modelPicker) ModelPickerSheet(model, sessionId) { modelPicker = false }
+    if (contextSheet) ContextSheet(model, sessionId) { contextSheet = false }
+    pendingFullAccess?.let { value ->
+        AlertDialog(
+            onDismissRequest = { pendingFullAccess = null },
+            title = { Text(Strings.fullAccessTitle) },
+            text = { Text(Strings.fullAccessMessage) },
+            confirmButton = {
+                TextButton(onClick = {
+                    model.selectPermission(value, sessionId)
+                    pendingFullAccess = null
+                }) { Text(Strings.fullAccessConfirm) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingFullAccess = null }) { Text(Strings.cancel) }
+            },
+        )
+    }
+}
+
+/**
+ * 输入框正文。
+ *
+ * 用 BasicTextField 而不是 M3 TextField：后者自带 56dp 起的容器与内边距，
+ * 装在输入卡片里会把整条输入区顶得很高，且容器色要一层层改回透明。
+ */
+@Composable
+private fun BasicComposerField(value: String, onValueChange: (String) -> Unit) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 8.dp)
+    ) {
+        if (value.isEmpty()) {
+            Text(
+                Strings.composerPlaceholder,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = Modifier.fillMaxWidth(),
+            maxLines = 6,
+            textStyle = MaterialTheme.typography.bodyLarge.copy(
+                color = MaterialTheme.colorScheme.onSurface,
+            ),
+            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+        )
+    }
+}
+
+fun permissionTitle(value: String, fallback: String): String = when (value) {
+    "read-only" -> Strings.accessRead
+    "workspace-write" -> Strings.accessWrite
+    "danger-full-access" -> Strings.accessFull
+    else -> fallback
+}
+
+@Composable
+private fun Chip(text: String, warn: Boolean = false, onClick: () -> Unit) {
+    Text(
+        text,
+        Modifier
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.surface)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        style = MaterialTheme.typography.labelLarge,
+        color = if (warn) Color(0xFFE08600) else MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1,
+    )
+}
+
+/** 上下文占用环。 */
+@Composable
+private fun ContextRing(percent: Int, onClick: () -> Unit) {
+    val track = MaterialTheme.colorScheme.outlineVariant
+    val progress = MaterialTheme.colorScheme.onSurfaceVariant
+    Box(
+        Modifier
+            .size(32.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        androidx.compose.foundation.Canvas(Modifier.size(18.dp)) {
+            drawCircle(track, style = Stroke(width = 2.dp.toPx()))
+            drawArc(
+                color = progress,
+                startAngle = -90f,
+                sweepAngle = 360f * (percent.coerceIn(0, 100) / 100f),
+                useCenter = false,
+                style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round),
+            )
+        }
+    }
+}
+
+@Composable
+private fun InfoLine(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String, tint: Color) {
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(icon, null, Modifier.size(14.dp), tint)
+        Text(text, style = MaterialTheme.typography.labelMedium, color = tint,
+            maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** 待办带：只在有条目时出现，点开看全部。 */
+@Composable
+private fun TodoStrip(store: SessionStore?) {
+    val todos = store?.todos ?: return
+    if (todos.isEmpty()) return
+    var expanded by remember { mutableStateOf(false) }
+    val done = todos.count { it.status == "completed" }
+    val active = todos.count { it.status == "in_progress" || it.status == "in-progress" }
+    val pending = todos.size - done - active
+    val header = todos.firstOrNull { it.status == "in_progress" || it.status == "in-progress" }?.content
+        ?: Strings.todoPanelTitle
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(Icons.Default.Checklist, null, Modifier.size(16.dp))
+            // 分组之间用「·」连接，与 iOS 的 progressLabel 同构。
+            val groups = buildList {
+                if (done > 0) add(Triple(Icons.Default.CheckCircle, done, Color(0xFF2E7D32)))
+                if (pending > 0) add(Triple(Icons.Default.RadioButtonUnchecked, pending, Color(0xFFE08600)))
+                if (active > 0) add(Triple(Icons.Default.Autorenew, active, MaterialTheme.colorScheme.primary))
+            }
+            groups.forEachIndexed { index, (icon, count, color) ->
+                if (index > 0) {
+                    Text("·", style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.outline)
+                }
+                StatusCount(icon, count, color)
+            }
+            Text(header, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Icon(
+                if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null,
+                Modifier.size(18.dp), MaterialTheme.colorScheme.outline,
+            )
+        }
+        if (expanded) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                todos.forEach { todo ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+                        Icon(todoIcon(todo.status), null, Modifier.size(16.dp), todoColor(todo.status))
+                        Text(todo.content, style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatusCount(icon: androidx.compose.ui.graphics.vector.ImageVector, count: Int, color: Color) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        Icon(icon, null, Modifier.size(12.dp), color)
+        Text(count.toString(), style = MaterialTheme.typography.labelMedium, color = color)
+    }
+}
+
+fun todoIcon(status: String): androidx.compose.ui.graphics.vector.ImageVector = when (status) {
+    "completed" -> Icons.Default.CheckCircle
+    "in_progress", "in-progress" -> Icons.Default.Autorenew
+    else -> Icons.Default.RadioButtonUnchecked
+}
+
+@Composable
+fun todoColor(status: String): Color = when (status) {
+    "completed" -> Color(0xFF2E7D32)
+    "in_progress", "in-progress" -> MaterialTheme.colorScheme.primary
+    else -> Color(0xFFE08600)
+}
+
+/** 目标条：有目标才出现，可暂停/恢复、编辑、清除。 */
+@Composable
+private fun GoalBar(model: PhoneModel, sessionId: SessionId, store: SessionStore?) {
+    val goal = store?.goal ?: return
+    var menu by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf(false) }
+    var objectiveDraft by remember { mutableStateOf("") }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = Dimens.stripRowHeight),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Dimens.stripSpacing),
+    ) {
+        Icon(
+            if (goal.phase == "paused") Icons.Default.PauseCircleOutline else Icons.Default.Flag,
+            null, Modifier.size(16.dp), MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(goal.objective, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Box {
+            IconButton(onClick = { menu = true }, modifier = Modifier.size(32.dp)) {
+                Icon(Icons.Default.MoreHoriz, null, Modifier.size(18.dp))
+            }
+            DropdownMenu(menu, { menu = false }) {
+                DropdownMenuItem(
+                    text = { Text(if (goal.phase == "paused") Strings.goalResume else Strings.goalPause) },
+                    onClick = { menu = false; model.toggleGoalPause(sessionId) },
+                )
+                DropdownMenuItem(
+                    text = { Text(Strings.goalEdit) },
+                    onClick = { menu = false; objectiveDraft = goal.objective; editing = true },
+                )
+                DropdownMenuItem(
+                    // 与 iOS 的 destructive role 同色。
+                    text = { Text(Strings.goalClear, color = MaterialTheme.colorScheme.error) },
+                    onClick = { menu = false; model.clearGoal(sessionId) },
+                )
+            }
+        }
+    }
+    if (editing) {
+        AlertDialog(
+            onDismissRequest = { editing = false },
+            title = { Text(Strings.goalEdit) },
+            text = {
+                OutlinedTextField(objectiveDraft, { objectiveDraft = it },
+                    label = { Text(Strings.goalObjective) })
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    model.editGoal(objectiveDraft, sessionId)
+                    editing = false
+                }) { Text(Strings.submit) }
+            },
+            dismissButton = { TextButton(onClick = { editing = false }) { Text(Strings.cancel) } },
+        )
+    }
+}
+
+/** 排队中的消息：可编辑、插队发送、撤回。 */
+@Composable
+private fun QueueStrip(model: PhoneModel, sessionId: SessionId, store: SessionStore) {
+    var editing by remember { mutableStateOf<QueuedInboxItem?>(null) }
+    var editDraft by remember { mutableStateOf("") }
+    Column(Modifier.fillMaxWidth()) {
+        store.queue.forEachIndexed { index, item ->
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .height(Dimens.stripRowHeight),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Dimens.stripSpacing),
+            ) {
+                Icon(Icons.Default.Schedule, null, Modifier.size(16.dp),
+                    MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(item.text, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                IconButton(onClick = { editDraft = item.text; editing = item }, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.Edit, Strings.queueEdit, Modifier.size(16.dp))
+                }
+                // 插队发送与 Mac 的 QueueRow 同口径：始终占位，只有回合在跑时才可用，
+                // 免得用户以为这个功能不存在（iOS 是直接隐藏，这里取更清楚的一种）。
+                IconButton(
+                    onClick = { model.steerQueued(item.id, sessionId) },
+                    enabled = store.running,
+                    modifier = Modifier.size(32.dp),
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Send,
+                        Strings.queueSteer,
+                        Modifier.size(16.dp),
+                        tint = if (store.running) MaterialTheme.colorScheme.onSurfaceVariant
+                        else MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
+                    )
+                }
+                IconButton(
+                    onClick = { model.removeQueued(item.id, sessionId) },
+                    modifier = Modifier.size(32.dp),
+                ) { Icon(Icons.Default.Close, Strings.queueRemove, Modifier.size(16.dp)) }
+            }
+            if (index < store.queue.size - 1) HorizontalDivider()
+        }
+    }
+    editing?.let { item ->
+        AlertDialog(
+            onDismissRequest = { editing = null },
+            title = { Text(Strings.queueEdit) },
+            text = { OutlinedTextField(editDraft, { editDraft = it }) },
+            confirmButton = {
+                TextButton(onClick = {
+                    model.editQueued(item.id, editDraft, sessionId)
+                    editing = null
+                }) { Text(Strings.submit) }
+            },
+            dismissButton = { TextButton(onClick = { editing = null }) { Text(Strings.cancel) } },
+        )
+    }
+}
+
+/** 候选条：贴在输入框上方，点按插入。 */
+@Composable
+private fun SuggestionList(suggestions: List<PhoneSuggestion>, onPick: (PhoneSuggestion) -> Unit) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(max = 208.dp)
+            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(12.dp))
+            .verticalScrollSafe(),
+    ) {
+        suggestions.forEach { suggestion ->
+            ListItem(
+                modifier = Modifier.clickable { onPick(suggestion) },
+                headlineContent = {
+                    Text(suggestion.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                },
+                supportingContent = suggestion.subtitle?.takeIf { it.isNotEmpty() }?.let {
+                    { Text(it, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                },
+                leadingContent = { Icon(suggestionIcon(suggestion.icon), null, Modifier.size(18.dp)) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun Modifier.verticalScrollSafe(): Modifier = this.verticalScroll(rememberScrollState())
+
+private fun suggestionIcon(name: String): androidx.compose.ui.graphics.vector.ImageVector = when (name) {
+    "folder" -> Icons.Default.Folder
+    "doc" -> Icons.Default.InsertDriveFile
+    "chat" -> Icons.AutoMirrored.Filled.Chat
+    "command" -> Icons.AutoMirrored.Filled.KeyboardArrowRight
+    else -> Icons.Default.AutoAwesome
+}
+
+/** 输入区上方的附件条。 */
+@Composable
+private fun AttachmentStrip(attachments: List<PhoneAttachment>, onRemove: (String) -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        attachments.forEach { attachment ->
+            InputChip(
+                selected = false,
+                onClick = { onRemove(attachment.id) },
+                label = { Text(attachment.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                avatar = {
+                    Icon(
+                        if (attachment.payload is PhoneAttachmentPayload.Image) Icons.Default.Image
+                        else Icons.Default.InsertDriveFile,
+                        null, Modifier.size(16.dp),
+                    )
+                },
+                trailingIcon = { Icon(Icons.Default.Close, null, Modifier.size(14.dp)) },
+            )
+        }
+    }
+}
+
+// —— 附件读取 ————————————————————————————————————————————————
+
+private fun loadImageAttachment(context: android.content.Context, uri: Uri): PhoneAttachment? = runCatching {
+    val resolver = context.contentResolver
+    val mediaType = resolver.getType(uri) ?: "image/jpeg"
+    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
+    PhoneAttachment(
+        name = displayName(context, uri) ?: "image",
+        payload = PhoneAttachmentPayload.Image(mediaType, Base64.encodeToString(bytes, Base64.NO_WRAP), bytes),
+    )
+}.getOrNull()
+
+private fun loadFileAttachment(context: android.content.Context, uri: Uri): PhoneAttachment? = runCatching {
+    val resolver = context.contentResolver
+    val name = displayName(context, uri) ?: "file"
+    val mediaType = resolver.getType(uri) ?: ""
+    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
+    if (mediaType.startsWith("image/")) {
+        return PhoneAttachment(
+            name = name,
+            payload = PhoneAttachmentPayload.Image(mediaType, Base64.encodeToString(bytes, Base64.NO_WRAP), bytes),
+        )
+    }
+    val copy = File(context.cacheDir, name)
+    copy.writeBytes(bytes)
+    PhoneAttachment(name = name, payload = PhoneAttachmentPayload.FilePayload(copy))
+}.getOrNull()
+
+private fun displayName(context: android.content.Context, uri: Uri): String? =
+    runCatching {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val index = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
+        }
+    }.getOrNull() ?: uri.lastPathSegment

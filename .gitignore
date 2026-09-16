@@ -1,0 +1,15 @@
+# Gradle / IDE build state
+.gradle/
+.kotlin/
+build/
+app/build/
+local.properties
+*.iml
+.idea/
+
+# Signing material never belongs in the repo
+*.jks
+*.keystore
+keystore.properties
+
+.DS_Store

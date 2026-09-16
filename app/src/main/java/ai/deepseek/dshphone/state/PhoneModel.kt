@@ -102,6 +102,8 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
     private var coordinator: StreamCoordinator? = null
     /// 已经建立连接的配置；用来让重复的 connectCurrent 变成空操作。
     private var connectedProfileId: String? = null
+    /** 会话清单拉取的代次；旧的一次回来晚了也不会盖掉新的一次。 */
+    private var sessionListRefreshGeneration = 0
     private val imageCache = mutableMapOf<String, Bitmap>()
     private val drafts = mutableMapOf<SessionId, String>()
 
@@ -162,12 +164,21 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun refreshInternal(markConnected: String? = null) {
         val client = api ?: return
+        sessionListRefreshGeneration++
+        val generation = sessionListRefreshGeneration
+        // 拉取期间落地的流帧先录下来，等基线落库后重放（与 Mac refreshSessions 同构）：
+        // `session/control` 基线带着每个会话的标题投影，往返途中到达时列表还是空的，
+        // 不录就整批丢掉，列表行只好退回 cwd basename，看起来就是"只有 workspace 名"。
+        val token = listStore.beginBaselinePull()
         try {
             val value = client.sessionList()
-            listStore.replaceSessions(value.items)
+            if (generation != sessionListRefreshGeneration) return
+            listStore.endBaselinePull(value.items, token)
             connection = Connection.Connected
             markConnected?.let { profiles.markConnected(it) }
         } catch (e: Exception) {
+            if (generation != sessionListRefreshGeneration) return
+            listStore.discardBaselinePull(token)
             connection = Connection.Failed(describe(e))
         }
     }
@@ -215,6 +226,8 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
         refreshInternal()
         val sessionId = selectedSessionId ?: return
         val store = sessions[sessionId] ?: return
+        // 重连后每条已注册的流都会重开，follow 的 snapshot 帧会重新送来完整基线；
+        // 这里清空窗口即可，不要用没有游标的分页去抢跑。
         store.resetWindow()
         loadHistory(store)
     }
@@ -244,6 +257,9 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
             listStore.selectedSessionId = sessionId
             listStore.clearCompleted(sessionId)
             val store = store(sessionId)
+            // 基线由 session/follow 的 snapshot 帧给出：它自带 records / hasMore / projections。
+            // 这里的分页只兜底"已经有实时事件、却还没有基线"的 store（通知唤起的那种）；
+            // 完全空白的新 store 没有游标，loadHistory 会直接跳过，转写保持加载态等 snapshot。
             coordinator?.follow(sessionId)
             if (!store.historyLoaded) loadHistory(store)
         }
@@ -251,12 +267,16 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
 
     suspend fun loadHistory(store: SessionStore) {
         val client = api ?: return
+        // 没有权威游标就不发 session/page：throughSeq 只能填一个假的 0，
+        // 主机会当成"截止到第 0 条事件"回一页非消息事件，反而把转写打成空态。
+        val throughSeq = store.historyCursor
+        if (throughSeq < 0) return
         store.loadingHistory = true
         val loadingOlder = store.historyLoaded
         try {
             val value = client.sessionHistory(
                 store.sessionId,
-                store.historyCursor,
+                throughSeq,
                 if (loadingOlder) store.firstSeq else null,
                 50,
             )
@@ -267,6 +287,14 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
         } finally {
             store.loadingHistory = false
         }
+    }
+
+    /** 基线取不回来时的重试：清掉错误并重开这条 follow。 */
+    fun retryHistory(sessionId: SessionId) {
+        val store = sessions[sessionId] ?: return
+        store.historyError = null
+        coordinator?.refollow(sessionId)
+        viewModelScope.launch { if (!store.historyLoaded) loadHistory(store) }
     }
 
     fun loadEarlier(store: SessionStore) {

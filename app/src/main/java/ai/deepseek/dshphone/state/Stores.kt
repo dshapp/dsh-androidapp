@@ -15,8 +15,19 @@ import kotlinx.serialization.json.JsonElement
 /** 会话列表：主机推来的会话清单加上本机侧的置顶/草稿/待办标记。 */
 class SessionListStore(private val prefs: SharedPreferences?) {
 
-    var sessions by mutableStateOf<List<SessionSummary>>(emptyList())
-        private set
+    private var sessionsState by mutableStateOf<List<SessionSummary>>(emptyList())
+
+    /**
+     * 会话清单。整体赋值是唯一的写入口，顺手作废派生缓存（与 Mac `sessions.didSet` 同构）——
+     * 其中就包括投影版本账本：它必须跟着行里的 projections 一起重建，否则一次
+     * `session/list` 刷新把行上的 title 换没了之后，旧的 seq 还会把重新推来的 title 挡在门外。
+     */
+    var sessions: List<SessionSummary>
+        get() = sessionsState
+        private set(value) {
+            sessionsState = value
+            projectionSeqCache = null
+        }
     var archivedSessionIds by mutableStateOf<List<SessionId>>(emptyList())
     var selectedSessionId: SessionId? = null
 
@@ -37,7 +48,24 @@ class SessionListStore(private val prefs: SharedPreferences?) {
     val sessionsById: Map<SessionId, SessionSummary> get() = sessions.associateBy { it.sessionId }
 
     private val previousRunning = mutableMapOf<SessionId, Boolean>()
-    private val projectionSeqBySession = mutableMapOf<SessionId, MutableMap<String, Int>>()
+
+    /**
+     * 每个键的投影版本：`asOfSeq` 是整块快照的截断点，但活跃的键会乱序到达，
+     * 一个键前进不能让另一个键的更新看起来变旧。账本从行里的 projections 派生，
+     * `sessions` 一变就重建，所以它永远不会比列表本身更"新"。
+     */
+    private var projectionSeqCache: MutableMap<SessionId, MutableMap<String, Int>>? = null
+    private val projectionSeqBySession: MutableMap<SessionId, MutableMap<String, Int>>
+        get() = projectionSeqCache ?: buildProjectionSeqs().also { projectionSeqCache = it }
+
+    private fun buildProjectionSeqs(): MutableMap<SessionId, MutableMap<String, Int>> {
+        val computed = mutableMapOf<SessionId, MutableMap<String, Int>>()
+        for (summary in sessions) {
+            val block = summary.projections ?: continue
+            computed[summary.sessionId] = block.values.keys.associateWith { block.asOfSeq }.toMutableMap()
+        }
+        return computed
+    }
 
     init {
         pinnedSessionOrder = readOrder(PINNED_KEY)
@@ -51,19 +79,84 @@ class SessionListStore(private val prefs: SharedPreferences?) {
         prefs?.edit()?.putString(key, value.joinToString("\n"))?.apply()
     }
 
-    fun replaceSessions(items: List<SessionSummary>) {
+    // —— 拉取基线期间的增量录制（与 Mac beginBaselinePull/endBaselinePull 同构）——————
+    //
+    // `session/list` 是一次 HTTP 往返，而 `session/control` 基线（会话标题就在它的
+    // projections 里）常常在往返途中就到了：那一刻列表还是空的，updateProjection
+    // 找不到行直接丢帧，行上就只剩 cwd basename——看起来正是"只显示 workspace 名"，
+    // 要等点开会话、SessionStore 拿到实时标题才补得回来。把拉取期间的增量录下来，
+    // 等基线落库后原样重放，这些帧就不会再丢。
+
+    private sealed interface RosterMutation {
+        data class Upserted(val summary: SessionSummary) : RosterMutation
+        data class Removed(val sessionId: SessionId) : RosterMutation
+        data class Running(val sessionId: SessionId, val running: Boolean) : RosterMutation
+        data class Activity(val sessionId: SessionId, val updatedAt: Double) : RosterMutation
+        data class Engaged(val sessionId: SessionId) : RosterMutation
+        data class Projection(
+            val sessionId: SessionId,
+            val key: String,
+            val value: JsonElement,
+            val seq: Int,
+        ) : RosterMutation
+    }
+
+    /** 正在进行的那次拉取的录制位；没有拉取在跑时为 null。 */
+    private var pullRecording: MutableList<RosterMutation>? = null
+    /** 标记录制位的归属，后发的拉取不会被先发的那次收尾抹掉。 */
+    private var pullRecordingToken = 0
+
+    /** 开始为即将发起的拉取录制增量，返回收尾时要回传的 token。 */
+    fun beginBaselinePull(): Int {
+        pullRecordingToken++
+        pullRecording = mutableListOf()
+        return pullRecordingToken
+    }
+
+    /** 结束一次已被后发拉取取代的录制，什么都不落库。 */
+    fun discardBaselinePull(token: Int) {
+        if (pullRecordingToken == token) pullRecording = null
+    }
+
+    /**
+     * 落库这次拉取的基线，并重放期间录下的每一条增量。
+     * 这些 mutator 重放时都是幂等的：upsert 只把 blank 往下压，recordActivity 与
+     * updateProjection 只进不退，setRunning 就是一次普通赋值。
+     */
+    fun endBaselinePull(items: List<SessionSummary>, token: Int) {
+        if (pullRecordingToken != token) return
+        val mutations = pullRecording ?: return
+        pullRecording = null
+        replaceSessions(items)
+        for (mutation in mutations) apply(mutation)
+    }
+
+    private fun record(mutation: RosterMutation) {
+        pullRecording?.add(mutation)
+    }
+
+    private fun apply(mutation: RosterMutation) {
+        when (mutation) {
+            is RosterMutation.Upserted -> upsert(mutation.summary)
+            is RosterMutation.Removed -> remove(mutation.sessionId)
+            is RosterMutation.Running -> setRunning(mutation.sessionId, mutation.running)
+            is RosterMutation.Activity -> recordActivity(mutation.sessionId, mutation.updatedAt)
+            is RosterMutation.Engaged -> markEngaged(mutation.sessionId)
+            is RosterMutation.Projection ->
+                updateProjection(mutation.sessionId, mutation.key, mutation.value, mutation.seq)
+        }
+    }
+
+    private fun replaceSessions(items: List<SessionSummary>) {
         sessions = items.sortedByDescending { it.updatedAt }
         syncCompletedNotifications()
     }
 
     fun upsert(summary: SessionSummary) {
+        record(RosterMutation.Upserted(summary))
         val index = sessions.indexOfFirst { it.sessionId == summary.sessionId }
         if (index < 0) {
             sessions = (sessions + summary).sortedByDescending { it.updatedAt }
-            summary.projections?.let { block ->
-                projectionSeqBySession[summary.sessionId] =
-                    block.values.keys.associateWith { block.asOfSeq }.toMutableMap()
-            }
             reconcileCompleted(summary)
             return
         }
@@ -80,9 +173,9 @@ class SessionListStore(private val prefs: SharedPreferences?) {
     }
 
     fun remove(sessionId: SessionId) {
+        record(RosterMutation.Removed(sessionId))
         sessions = sessions.filterNot { it.sessionId == sessionId }
         previousRunning.remove(sessionId)
-        projectionSeqBySession.remove(sessionId)
         completedSessionIds = completedSessionIds - sessionId
         awaitingUserSessionIds = awaitingUserSessionIds - sessionId
         awaitingUserKinds = awaitingUserKinds - sessionId
@@ -91,6 +184,7 @@ class SessionListStore(private val prefs: SharedPreferences?) {
     }
 
     fun recordActivity(sessionId: SessionId, updatedAt: Double) {
+        record(RosterMutation.Activity(sessionId, updatedAt))
         val index = sessions.indexOfFirst { it.sessionId == sessionId }
         if (index < 0 || updatedAt <= sessions[index].updatedAt) return
         val updated = sessions.toMutableList()
@@ -99,12 +193,14 @@ class SessionListStore(private val prefs: SharedPreferences?) {
     }
 
     fun markEngaged(sessionId: SessionId) {
+        record(RosterMutation.Engaged(sessionId))
         val index = sessions.indexOfFirst { it.sessionId == sessionId }
         if (index < 0 || !sessions[index].blank) return
         sessions = sessions.toMutableList().also { it[index] = it[index].copy(blank = false) }
     }
 
     fun setRunning(sessionId: SessionId, running: Boolean) {
+        record(RosterMutation.Running(sessionId, running))
         val index = sessions.indexOfFirst { it.sessionId == sessionId }
         if (index < 0) return
         val updated = sessions.toMutableList()
@@ -113,11 +209,19 @@ class SessionListStore(private val prefs: SharedPreferences?) {
         reconcileCompleted(updated[index])
     }
 
+    /**
+     * 把一帧 `session/projection` 镜像进这条会话的列表行快照（与 Mac updateProjection 同构）：
+     * 列表行的标题只认 `projections["title"]`，而 `session/list` 的投影列来自主机侧缓存、
+     * `host/session-added` 更是完全不带投影，所以没打开过的会话全靠这条路拿到标题。
+     * 乱序/重复帧按键比对 seq，只有更新的才覆盖；行还没进列表（帧跑到 `session-added` 前面）
+     * 时录制/重放兜底，不在录制期就交给下一次完整刷新。
+     */
     fun updateProjection(sessionId: SessionId, key: String, value: JsonElement, seq: Int) {
+        record(RosterMutation.Projection(sessionId, key, value, seq))
         val index = sessions.indexOfFirst { it.sessionId == sessionId }
         if (index < 0) return
-        val seqs = projectionSeqBySession.getOrPut(sessionId) { mutableMapOf() }
-        if (seq <= (seqs[key] ?: -1)) return
+        val seqs = projectionSeqBySession
+        if (seq <= (seqs[sessionId]?.get(key) ?: -1)) return
         val existing = sessions[index].projections
         val values = (existing?.values ?: emptyMap()).toMutableMap()
         values[key] = value
@@ -126,7 +230,10 @@ class SessionListStore(private val prefs: SharedPreferences?) {
             projections = SessionProjectionsBlock(maxOf(existing?.asOfSeq ?: 0, seq), values)
         )
         sessions = updated
-        seqs[key] = seq
+        // 上一行作废了账本缓存，这里把刚算好的账本连同本键的新版本重新装回去，
+        // 免得高频投影帧每来一帧都重建一遍。
+        seqs.getOrPut(sessionId) { mutableMapOf() }[key] = seq
+        projectionSeqCache = seqs
     }
 
     fun setPinned(sessionId: SessionId, pinned: Boolean) {

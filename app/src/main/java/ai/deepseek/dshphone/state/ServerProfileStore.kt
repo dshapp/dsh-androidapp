@@ -159,10 +159,17 @@ class ServerProfileStore(context: Context) {
     }
 }
 
-/** 二维码里的一行字：`dshm://<proxy 主机>:<端口>/<桥接公钥>#<一次性配对码>`。 */
+/** 二维码里的一行字：`dshm://<proxy 主机>:<端口>/<桥接公钥>?name=<Mac 名>#<一次性配对码>`。 */
 object PairingPayload {
 
-    data class Scanned(val host: String, val port: Int, val bridgeKey: String, val token: String?)
+    data class Scanned(
+        val host: String,
+        val port: Int,
+        val bridgeKey: String,
+        val token: String?,
+        /** Mac 自报的设备名；老版本桥接不带这一项。 */
+        val deviceName: String?,
+    )
 
     fun parse(text: String): Scanned? {
         val trimmed = text.trim()
@@ -173,9 +180,16 @@ object PairingPayload {
         val bridgeKey = uri.path?.trimStart('/')?.takeIf { it.isNotBlank() } ?: return null
         if (runCatching { decodeKey(bridgeKey).size }.getOrNull() != Noise.KEY_LENGTH) return null
         val token = uri.fragment?.takeIf { it.isNotBlank() }
-        return Scanned(host, port, bridgeKey, token)
+        val deviceName = runCatching { uri.getQueryParameter("name") }.getOrNull()
+            ?.trim()?.takeIf { it.isNotBlank() }
+        return Scanned(host, port, bridgeKey, token, deviceName)
     }
 
-    /** 扫码页显示的默认名字：二维码里没有 Mac 名，用地址兜底，用户可以改。 */
-    fun suggestedName(text: String): String = parse(text)?.host ?: "Mac"
+    /**
+     * 扫码页显示的默认名字：用 Mac 自己的设备名。
+     *
+     * 中转 proxy 是多人多设备共用的，拿它的地址当名字既认不出是哪台 Mac，也会让
+     * 同一个中转下的多台 Mac 重名；只有老版本桥接不带设备名时才退回地址。
+     */
+    fun suggestedName(text: String): String = parse(text)?.let { it.deviceName ?: it.host } ?: "Mac"
 }

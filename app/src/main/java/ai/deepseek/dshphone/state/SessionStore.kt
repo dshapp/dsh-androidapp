@@ -192,8 +192,15 @@ class SessionStore(val sessionId: SessionId) {
     val firstSeq: Int? get() = eventWindow.firstSeq
     val historyWindow: List<HistoryEntry> get() = eventWindow.entries
 
+    /**
+     * 分页请求的 throughSeq；没有权威游标时是 -1，调用方必须跳过这次请求。
+     *
+     * 不能把未知游标钳成 0：主机把 throughSeq 读作"截止到这一条事件"，0 只会回来
+     * 一条 permission/preset，historyLoaded 却已置真，转写于是闪一下"还没有消息"，
+     * 而且那页带回的 hasMore=false 还会顺手关掉"加载更早"。
+     */
     val historyCursor: Int
-        get() = max(subscribedLastSeq ?: max(lastSeq, historyCursorHint), 0)
+        get() = subscribedLastSeq ?: max(lastSeq, historyCursorHint)
 
     val repairCursor: Int
         get() = maxOf(

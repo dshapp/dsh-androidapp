@@ -21,12 +21,25 @@ object Dimens {
     val cardRadius = 12.dp
     val cardPadding = 12.dp
     val chromeRowHeight = 24.dp
-    val iconSlot = 16.dp
+    /** 卡片行左侧图标：比正文行的图标小一级，跟摘要的字号配套。 */
+    val iconSlot = 14.dp
     val bubbleRadius = 18.dp
     val listRowPadding = 4.dp
     val stripRowHeight = 44.dp
     val stripIconSlot = 28.dp
     val stripSpacing = 8.dp
+}
+
+/**
+ * 转写里"外围"元素的色阶：思考卡、工具卡这类卡片不是正文，
+ * 比 onSurfaceVariant 再弱一级（M3 的 outline 档），让它们明显退到正文后面。
+ */
+object DshChrome {
+    /** 卡片行的图标与摘要。 */
+    val label: Color @Composable get() = MaterialTheme.colorScheme.outline
+
+    /** 卡片行尾部的附注：比摘要再淡一点。 */
+    val labelSubtle: Color @Composable get() = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f)
 }
 
 private val LightScheme = lightColorScheme(primary = Color(0xFF1C64F2))

@@ -12,6 +12,9 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -24,10 +27,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
@@ -59,22 +66,30 @@ fun ChatScreen(
     val haptics = LocalHapticFeedback.current
     val clipboard = LocalClipboardManager.current
     val findFocus = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
+
+    // 退出查找统一走这里：先收键盘再拆输入框，避免软键盘留在屏幕上空占半屏。
+    val exitFind = {
+        focusManager.clearFocus()
+        finding = false
+        findQuery = ""
+    }
 
     LaunchedEffect(sessionId) { model.open(sessionId) }
 
     // 系统返回键：查找态先退出查找，再退出会话（与标题栏返回同一口径）。
-    BackHandler(enabled = finding) {
-        finding = false
-        findQuery = ""
-    }
+    BackHandler(enabled = finding) { exitFind() }
 
     LaunchedEffect(finding) { if (finding) findFocus.requestFocus() }
 
     val nodes = store?.nodes ?: emptyList()
     val visibleNodes = remember(nodes, finding, findQuery) {
+        // 画不出内容的行不占列表项，否则 spacedBy 会在原地留一道空隙，
+        // 贴底滚动也会停在一行看不见的东西上。
+        val rows = nodes.filter { it.rendersRow }
         val needle = findQuery.trim()
-        if (!finding || needle.isEmpty()) nodes
-        else nodes.filter { chatNodeSearchText(it).contains(needle, ignoreCase = true) }
+        if (!finding || needle.isEmpty()) rows
+        else rows.filter { chatNodeSearchText(it).contains(needle, ignoreCase = true) }
     }
 
     val atBottom by remember {
@@ -124,36 +139,62 @@ fun ChatScreen(
             TopAppBar(
                 title = {
                     if (finding) {
-                        OutlinedTextField(
-                            value = findQuery,
-                            onValueChange = { findQuery = it },
-                            placeholder = { Text(Strings.findInChat) },
-                            singleLine = true,
-                            // 有查询就报命中行数，免得读者对着空列表猜是不是没搜到。
-                            trailingIcon = {
-                                if (findQuery.isNotBlank()) {
-                                    Text(
-                                        visibleNodes.size.toString(),
-                                        Modifier.padding(end = 12.dp),
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .focusRequester(findFocus),
-                        )
+                        // 查找态按原生「标题栏变查找栏」的做法：标题位只放一行无边框输入，
+                        // 计数与清除挪到 actions。M3 的 OutlinedTextField 最小高度 56dp，
+                        // 塞进 64dp 的标题栏会被挤扁，描边框也不是系统查找栏的样子。
+                        Box(contentAlignment = Alignment.CenterStart) {
+                            if (findQuery.isEmpty()) {
+                                Text(
+                                    Strings.findInChat,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            BasicTextField(
+                                value = findQuery,
+                                onValueChange = { findQuery = it },
+                                singleLine = true,
+                                textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                ),
+                                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                                // 结果是边打边筛的，回车只用来收键盘，让出屏幕看命中行。
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .focusRequester(findFocus),
+                            )
+                        }
                     } else {
                         Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = {
-                        if (finding) { finding = false; findQuery = "" } else onBack()
-                    }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) }
+                    IconButton(onClick = { if (finding) exitFind() else onBack() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
+                    }
                 },
                 actions = {
+                    if (finding) {
+                        // 有查询就报命中行数，免得读者对着空列表猜是不是没搜到。
+                        if (findQuery.isNotBlank()) {
+                            Text(
+                                visibleNodes.size.toString(),
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        // 清除只清文字并把光标留在框里，退出查找交给返回键，二者不混用。
+                        if (findQuery.isNotEmpty()) {
+                            IconButton(onClick = { findQuery = ""; findFocus.requestFocus() }) {
+                                Icon(Icons.Default.Close, Strings.close)
+                            }
+                        }
+                        return@TopAppBar
+                    }
                     Box {
                         IconButton(
                             onClick = { turnMenu = true },
@@ -245,7 +286,8 @@ fun ChatScreen(
                 contentPadding = PaddingValues(horizontal = Dimens.columnInset, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(Dimens.rowSpacing),
             ) {
-                if (store?.hasMore == true) {
+                // 基线没到时别把"加载更早"顶在空列表上：那会和加载态叠成两个状态。
+                if (store?.hasMore == true && store.historyLoaded && visibleNodes.isNotEmpty()) {
                     item(key = "earlier") {
                         // 顶部哨兵：滚到最上面就自动把更早的历史拉进窗口（对齐 iOS 的 onAppear）。
                         LaunchedEffect(store.firstSeq, store.loadingHistory) {
@@ -308,10 +350,31 @@ fun ChatScreen(
                 }
             }
 
-            if (store?.historyLoaded == true && nodes.isEmpty() && !store.loadingHistory) {
-                EmptyStateColumn(Icons.AutoMirrored.Filled.Chat, Strings.emptyChat, Strings.emptyChatHint)
-            } else if (nodes.isEmpty()) {
-                CircularProgressIndicator(Modifier.align(Alignment.Center))
+            // 转写的三种"没内容"形态只认基线：基线还在路上一律转圈，
+            // 只有真的拿到了基线还是零节点才算空会话，取不回来则报错并给重试。
+            val historyError = store?.historyError
+            when {
+                nodes.isNotEmpty() -> Unit
+                historyError != null -> Column(
+                    Modifier
+                        .align(Alignment.Center)
+                        .padding(32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(Icons.Default.CloudOff, null, Modifier.size(40.dp), MaterialTheme.colorScheme.outline)
+                    Text(Strings.historyUnavailable, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        historyError.message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                    TextButton(onClick = { model.retryHistory(sessionId) }) { Text(Strings.retry) }
+                }
+                store?.historyLoaded == true && !store.loadingHistory ->
+                    EmptyStateColumn(Icons.AutoMirrored.Filled.Chat, Strings.emptyChat, Strings.emptyChatHint)
+                else -> CircularProgressIndicator(Modifier.align(Alignment.Center))
             }
 
             AnimatedVisibility(

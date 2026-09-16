@@ -22,6 +22,21 @@ fun formatDuration(ms: Double): String {
     return if (minutes > 0) fmt(Strings.durationMinutes, minutes, seconds) else fmt(Strings.durationSeconds, seconds)
 }
 
+/**
+ * 上下文面板里的用时读数：不足一分钟保留一位小数（45.2秒），超过就按分秒拆开（2分42秒）。
+ * 与 Mac formatStatsDuration 同口径。
+ */
+fun formatStatsDuration(ms: Double): String {
+    val seconds = max(0.0, ms) / 1000
+    if (seconds < 60) {
+        val tenths = (seconds * 10).roundToLong()
+        val text = if (tenths % 10 == 0L) "${tenths / 10}" else "${tenths / 10}.${tenths % 10}"
+        return fmt(Strings.durationSecondsText, text)
+    }
+    val whole = seconds.roundToLong()
+    return fmt(Strings.statsDurationMinutes, whole / 60, whole % 60)
+}
+
 fun formatLatencySeconds(ms: Double): String {
     val s = max(0.0, ms) / 1000
     return if (s < 10) String.format("%.1f", (s * 10).roundToInt() / 10.0) else String.format("%.0f", s)

@@ -4,6 +4,7 @@ import ai.deepseek.dshphone.i18n.Strings
 import ai.deepseek.dshphone.state.PairingPayload
 import android.Manifest
 import android.content.pm.PackageManager
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -17,7 +18,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -55,6 +55,13 @@ fun PairingScreen(onDismiss: () -> Unit, onPaired: (String, String) -> Unit) {
         if (!granted) permissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
+    // 扫码提示改为进入时 toast 一次，避免常驻浮层被其它 UI 遮挡。
+    LaunchedEffect(granted, manual) {
+        if (granted && !manual) {
+            Toast.makeText(context, Strings.scanHint, Toast.LENGTH_SHORT).show()
+        }
+    }
+
     fun handle(text: String) {
         if (PairingPayload.parse(text) == null) {
             error = Strings.pairInvalid
@@ -88,16 +95,6 @@ fun PairingScreen(onDismiss: () -> Unit, onPaired: (String, String) -> Unit) {
                 ) {
                     if (granted && !manual) {
                         QrScanner(onScan = { handle(it) })
-                        Surface(
-                            Modifier
-                                .align(Alignment.BottomCenter)
-                                .padding(24.dp),
-                            shape = MaterialTheme.shapes.medium,
-                            tonalElevation = 3.dp,
-                        ) {
-                            Text(Strings.scanHint, Modifier.padding(12.dp),
-                                style = MaterialTheme.typography.bodyMedium)
-                        }
                     } else {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             OutlinedTextField(

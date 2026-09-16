@@ -31,17 +31,37 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -54,13 +74,17 @@ import java.io.File
 fun ComposerBar(
     model: PhoneModel,
     sessionId: SessionId,
+    autoFocus: Boolean = false,
     onSubmitted: (SessionId) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val store = model.sessions[sessionId]
     val haptics = LocalHapticFeedback.current
-    var draft by remember(sessionId) { mutableStateOf(model.draft(sessionId)) }
+    var draft by remember(sessionId) {
+        val saved = model.draft(sessionId)
+        mutableStateOf(TextFieldValue(saved, TextRange(saved.length)))
+    }
     var attachments by remember(sessionId) { mutableStateOf<List<PhoneAttachment>>(emptyList()) }
     var suggestions by remember { mutableStateOf<List<PhoneSuggestion>>(emptyList()) }
     var attachMenu by remember { mutableStateOf(false) }
@@ -94,7 +118,7 @@ fun ComposerBar(
         }
         scope.launch {
             val items = model.suggestions(token, sessionId)
-            if (TriggerToken.parse(draft) == token) suggestions = items
+            if (TriggerToken.parse(draft.text) == token) suggestions = items
         }
     }
 
@@ -102,7 +126,7 @@ fun ComposerBar(
     val takeover = store?.subagentAddress?.let {
         if (it.mode == SubagentMode.CONTINUABLE) Strings.subagentComposer else Strings.subagentReadOnly
     }
-    val sendDisabled = (draft.isBlank() && attachments.isEmpty()) || rejection != null
+    val sendDisabled = (draft.text.isBlank() && attachments.isEmpty()) || rejection != null
 
     fun send() {
         if (rejection != null) return
@@ -110,15 +134,15 @@ fun ComposerBar(
         val address = store?.subagentAddress
         if (address != null) {
             if (address.mode != SubagentMode.CONTINUABLE) return
-            val text = draft
-            draft = ""
+            val text = draft.text
+            draft = TextFieldValue("")
             model.setDraft("", sessionId)
             scope.launch { model.sendToSubagent(text, sessionId) }
             return
         }
-        val text = draft
+        val text = draft.text
         val files = attachments
-        draft = ""
+        draft = TextFieldValue("")
         attachments = emptyList()
         suggestions = emptyList()
         model.setDraft("", sessionId)
@@ -142,10 +166,12 @@ fun ComposerBar(
             if (store != null && store.queue.isNotEmpty()) QueueStrip(model, sessionId, store)
             if (suggestions.isNotEmpty()) {
                 SuggestionList(suggestions) { suggestion ->
-                    val token = TriggerToken.parse(draft)
+                    val token = TriggerToken.parse(draft.text)
                     if (token != null) {
-                        draft = draft.replaceRange(token.start, token.end, suggestion.insert)
-                        model.setDraft(draft, sessionId)
+                        // 替换触发 token，并把光标落到插入内容之后（胶囊后面）。
+                        val text = draft.text.replaceRange(token.start, token.end, suggestion.insert)
+                        draft = TextFieldValue(text, TextRange(token.start + suggestion.insert.length))
+                        model.setDraft(text, sessionId)
                     }
                     suggestions = emptyList()
                 }
@@ -168,14 +194,19 @@ fun ComposerBar(
             ) {
                 BasicComposerField(
                     value = draft,
+                    autoFocus = autoFocus,
                     onValueChange = {
-                        draft = it
-                        model.setDraft(it, sessionId)
-                        refreshSuggestions(it)
+                        val next = atomicTokenEdit(draft, it)
+                        draft = next
+                        model.setDraft(next.text, sessionId)
+                        refreshSuggestions(next.text)
                     },
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { draft = "/"; refreshSuggestions("/") }, modifier = Modifier.size(32.dp)) {
+                    IconButton(
+                        onClick = { draft = TextFieldValue("/", TextRange(1)); refreshSuggestions("/") },
+                        modifier = Modifier.size(32.dp),
+                    ) {
                         Icon(Icons.Default.Add, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Box {
@@ -205,11 +236,12 @@ fun ComposerBar(
                         Modifier
                             .weight(1f)
                             .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        // 去掉胶囊底色后，两段纯文本之间需要更明显的间距才不会读成一句。
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Box {
-                            Chip(
+                            TextAction(
                                 store?.permissions?.currentOption?.let { permissionTitle(it.value, it.name) }
                                     ?: Strings.permissions,
                                 warn = store?.permissions?.currentValue == "danger-full-access",
@@ -245,12 +277,12 @@ fun ComposerBar(
                                 Icon(Icons.Default.Close, null, Modifier.size(12.dp), Color(0xFFE08600))
                             }
                         }
-                        Chip(store?.modelDirectory?.current?.model ?: Strings.model) { modelPicker = true }
+                        TextAction(store?.modelDirectory?.current?.model ?: Strings.model) { modelPicker = true }
                     }
                     store?.contextOccupancy?.let { occupancy ->
                         ContextRing(occupancy.percent) { contextSheet = true }
                     }
-                    if (store?.running == true && draft.isBlank()) {
+                    if (store?.running == true && draft.text.isBlank()) {
                         IconButton(
                             onClick = {
                                 if (store.subagentAddress != null) model.interruptSubagent(sessionId)
@@ -272,8 +304,8 @@ fun ComposerBar(
                         IconButton(
                             onClick = {
                                 if (store?.running == true) {
-                                    val text = draft
-                                    draft = ""
+                                    val text = draft.text
+                                    draft = TextFieldValue("")
                                     scope.launch { model.steer(text, sessionId) }
                                 } else send()
                             },
@@ -319,14 +351,53 @@ fun ComposerBar(
  * 用 BasicTextField 而不是 M3 TextField：后者自带 56dp 起的容器与内边距，
  * 装在输入卡片里会把整条输入区顶得很高，且容器色要一层层改回透明。
  */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun BasicComposerField(value: String, onValueChange: (String) -> Unit) {
+private fun BasicComposerField(
+    value: TextFieldValue,
+    autoFocus: Boolean = false,
+    onValueChange: (TextFieldValue) -> Unit,
+) {
+    val tokens = remember(value.text) { composerTokens(value.text) }
+    val tokenText = MaterialTheme.colorScheme.primary
+    val pill = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    // 触发 token 在正文里着色；胶囊底色画在文字下方（BasicTextField 无法直接带圆角背景）。
+    val decorate = remember(tokens, tokenText) {
+        VisualTransformation { original ->
+            TransformedText(
+                AnnotatedString(
+                    original.text,
+                    tokens.map {
+                        AnnotatedString.Range(
+                            SpanStyle(color = tokenText, fontWeight = FontWeight.Medium),
+                            it.first, it.last + 1,
+                        )
+                    },
+                ),
+                OffsetMapping.Identity,
+            )
+        }
+    }
+    // 新建会话弹层里直接把光标落进输入框并唤起键盘；弹层刚挂载时窗口还没拿到焦点，
+    // requestFocus 会抛 IllegalStateException，所以等一帧再试，失败了再补一次。
+    val focusRequester = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(autoFocus) {
+        if (!autoFocus) return@LaunchedEffect
+        withFrameNanos { }
+        if (runCatching { focusRequester.requestFocus() }.isFailure) {
+            delay(120)
+            runCatching { focusRequester.requestFocus() }
+        }
+        keyboard?.show()
+    }
     Box(
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 4.dp, vertical = 8.dp)
     ) {
-        if (value.isEmpty()) {
+        if (value.text.isEmpty()) {
             Text(
                 Strings.composerPlaceholder,
                 style = MaterialTheme.typography.bodyLarge,
@@ -336,12 +407,79 @@ private fun BasicComposerField(value: String, onValueChange: (String) -> Unit) {
         BasicTextField(
             value = value,
             onValueChange = onValueChange,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .focusRequester(focusRequester)
+                .drawBehind {
+                    val result = layout ?: return@drawBehind
+                    tokens.forEach { drawTokenPill(result, it, pill) }
+                },
             maxLines = 6,
             textStyle = MaterialTheme.typography.bodyLarge.copy(
                 color = MaterialTheme.colorScheme.onSurface,
             ),
+            visualTransformation = decorate,
+            onTextLayout = { layout = it },
             cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+        )
+    }
+}
+
+/**
+ * 正文中要画成胶囊的触发 token：行首的 `/指令`、空白后的 `$skill` 与 `@引用`
+ * （与 TriggerToken.parse 的识别规则一致，只是这里要同时命中已完成的 token）。
+ */
+private fun composerTokens(text: String): List<IntRange> {
+    val out = mutableListOf<IntRange>()
+    var i = 0
+    while (i < text.length) {
+        val head = text[i]
+        val atBoundary = i == 0 || text[i - 1] == ' ' || text[i - 1] == '\n'
+        if (atBoundary && (head == '@' || head == '$' || (head == '/' && i == 0))) {
+            var end = i + 1
+            while (end < text.length && text[end] != ' ' && text[end] != '\n') end++
+            if (end > i + 1) out.add(i until end)
+            i = end
+        } else {
+            i++
+        }
+    }
+    return out
+}
+
+/**
+ * 把胶囊当一个整体删：退格删掉的那个字符落在某个 token 里时，整段 token 一起删，
+ * 光标落到 token 原来的位置；其余编辑（包括多选删除、输入法组字）原样放行。
+ */
+private fun atomicTokenEdit(old: TextFieldValue, new: TextFieldValue): TextFieldValue {
+    if (new.text.length != old.text.length - 1) return new
+    val cut = new.selection.start
+    if (cut < 0 || cut >= old.text.length) return new
+    // 只认"删掉 old[cut] 这一个字符"的退格，别的编辑不改写。
+    if (old.text.removeRange(cut, cut + 1) != new.text) return new
+    val token = composerTokens(old.text).firstOrNull { cut >= it.first && cut <= it.last } ?: return new
+    return TextFieldValue(old.text.removeRange(token.first, token.last + 1), TextRange(token.first))
+}
+
+/** 按行画一段 token 的胶囊底（token 换行时每行各画一段）。 */
+private fun DrawScope.drawTokenPill(layout: TextLayoutResult, range: IntRange, color: Color) {
+    if (range.last + 1 > layout.layoutInput.text.length) return
+    val firstLine = layout.getLineForOffset(range.first)
+    val lastLine = layout.getLineForOffset(range.last)
+    for (line in firstLine..lastLine) {
+        val from = maxOf(range.first, layout.getLineStart(line))
+        val to = minOf(range.last + 1, layout.getLineEnd(line, visibleEnd = true))
+        if (to <= from) continue
+        val left = layout.getHorizontalPosition(from, usePrimaryDirection = true)
+        val right = layout.getHorizontalPosition(to, usePrimaryDirection = true)
+        val top = layout.getLineTop(line)
+        val bottom = layout.getLineBottom(line)
+        val inset = 3.dp.toPx()
+        drawRoundRect(
+            color,
+            topLeft = Offset(left - inset, top),
+            size = Size(right - left + inset * 2, bottom - top),
+            cornerRadius = CornerRadius((bottom - top) / 2f),
         )
     }
 }
@@ -353,15 +491,14 @@ fun permissionTitle(value: String, fallback: String): String = when (value) {
     else -> fallback
 }
 
+/** 权限/模型切换：纯文本展示，不带胶囊底色。 */
 @Composable
-private fun Chip(text: String, warn: Boolean = false, onClick: () -> Unit) {
+private fun TextAction(text: String, warn: Boolean = false, onClick: () -> Unit) {
     Text(
         text,
         Modifier
-            .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.surface)
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 6.dp),
+            .padding(horizontal = 2.dp, vertical = 6.dp),
         style = MaterialTheme.typography.labelLarge,
         color = if (warn) Color(0xFFE08600) else MaterialTheme.colorScheme.onSurfaceVariant,
         maxLines = 1,
@@ -448,11 +585,16 @@ private fun TodoStrip(store: SessionStore?) {
             )
         }
         if (expanded) {
+            // 图标按正文首行的行高居中：Top 对齐会让图标顶到行框上沿，和字面看着错开一格。
+            val itemStyle = MaterialTheme.typography.bodyMedium
+            val firstLineHeight = with(LocalDensity.current) { itemStyle.lineHeight.toDp() }
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 todos.forEach { todo ->
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
-                        Icon(todoIcon(todo.status), null, Modifier.size(16.dp), todoColor(todo.status))
-                        Text(todo.content, style = MaterialTheme.typography.bodyMedium,
+                        Box(Modifier.height(firstLineHeight), contentAlignment = Alignment.Center) {
+                            Icon(todoIcon(todo.status), null, Modifier.size(13.dp), todoColor(todo.status))
+                        }
+                        Text(todo.content, style = itemStyle,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
@@ -614,30 +756,39 @@ private fun SuggestionList(suggestions: List<PhoneSuggestion>, onPick: (PhoneSug
             .verticalScrollSafe(),
     ) {
         suggestions.forEach { suggestion ->
-            ListItem(
-                modifier = Modifier.clickable { onPick(suggestion) },
-                headlineContent = {
-                    Text(suggestion.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                },
-                supportingContent = suggestion.subtitle?.takeIf { it.isNotEmpty() }?.let {
-                    { Text(it, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-                },
-                leadingContent = { Icon(suggestionIcon(suggestion.icon), null, Modifier.size(18.dp)) },
-            )
+            // 单行：完整名称 + 描述（名称不压缩，描述放不下省略）。
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { onPick(suggestion) }
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    suggestion.title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    softWrap = false,
+                )
+                suggestion.subtitle?.takeIf { it.isNotEmpty() }?.let {
+                    Text(
+                        it,
+                        Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
         }
     }
 }
 
 @Composable
 private fun Modifier.verticalScrollSafe(): Modifier = this.verticalScroll(rememberScrollState())
-
-private fun suggestionIcon(name: String): androidx.compose.ui.graphics.vector.ImageVector = when (name) {
-    "folder" -> Icons.Default.Folder
-    "doc" -> Icons.Default.InsertDriveFile
-    "chat" -> Icons.AutoMirrored.Filled.Chat
-    "command" -> Icons.AutoMirrored.Filled.KeyboardArrowRight
-    else -> Icons.Default.AutoAwesome
-}
 
 /** 输入区上方的附件条。 */
 @Composable

@@ -59,7 +59,8 @@ fun MessageRow(
         is ChatNode.ModelRetry -> NoticeRow(Icons.Default.Refresh, Strings.modelRetry, Color(0xFFE08600))
         is ChatNode.TurnMaxTokens -> NoticeRow(Icons.Default.ErrorOutline, Strings.maxTokens, Color(0xFFE08600))
         is ChatNode.Command -> NoticeRow(Icons.AutoMirrored.Filled.KeyboardArrowRight, "/" + (node.data.name ?: ""))
-        is ChatNode.TurnTail -> TurnTailRow(node.data, onFork)
+        // 收尾消息还没落定的轮次没有页脚（对齐 Mac 的 `TurnTailRow`）。
+        is ChatNode.TurnTail -> if (node.rendersRow) TurnTailRow(node.data, onFork)
         is ChatNode.TurnProcess -> TurnProcessRow(node.spec, store)
         is ChatNode.SystemPrompt -> SystemPromptRow(node.data)
         is ChatNode.Workflow -> WorkflowRunCard(node.data)

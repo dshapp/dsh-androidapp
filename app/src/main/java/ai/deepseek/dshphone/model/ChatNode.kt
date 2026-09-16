@@ -346,6 +346,25 @@ val ChatNode.anchorSeq: Double
         is ChatNode.UnknownSurface -> data.seq.toDouble()
     }
 
+/**
+ * 这一行是不是真的有内容可画。
+ *
+ * 轮次页脚（复制、分叉、用量、用时、结束时刻）在 turn/start 就建好了上下文，
+ * 但它描述的是「这一轮收尾时」的事实：要等 turn/end 把收尾助手消息折进来
+ * （messageId 落定）才成立。在此之前它的 seq 还是 turn/start 的 seq，排在
+ * 这一轮的最前面——也就是紧贴系统提示卡片（同样锚在 turn/start）下方，于是
+ * 一轮刚开始就先冒出一行分叉图标加时刻。
+ *
+ * Mac 的 `TurnTailRow` 用 `if data.messageId != nil` 把这一行关住，
+ * Web 的 `TurnTailNodeView` 在 `closing === null` 时直接返回 null；这里是
+ * 同一道关。
+ */
+val ChatNode.rendersRow: Boolean
+    get() = when (this) {
+        is ChatNode.TurnTail -> data.messageId != null
+        else -> true
+    }
+
 val ChatNode.turnNumber: Int?
     get() = when (this) {
         is ChatNode.Assistant -> step.turn

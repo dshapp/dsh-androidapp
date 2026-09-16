@@ -4,6 +4,7 @@ import ai.deepseek.dshphone.i18n.Strings
 import ai.deepseek.dshphone.model.*
 import ai.deepseek.dshphone.net.*
 import ai.deepseek.dshphone.ui.theme.Dimens
+import ai.deepseek.dshphone.ui.theme.DshChrome
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -41,7 +42,7 @@ fun CardRow(
     summary: String,
     modifier: Modifier = Modifier,
     suffix: String? = null,
-    tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    tint: Color = DshChrome.label,
     running: Boolean = false,
     onClick: (() -> Unit)? = null,
 ) {
@@ -72,7 +73,7 @@ fun CardRow(
             }
             Text(
                 summary,
-                style = MaterialTheme.typography.labelLarge,
+                style = MaterialTheme.typography.labelMedium,
                 color = tint,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -81,8 +82,8 @@ fun CardRow(
             if (suffix != null) {
                 Text(
                     suffix,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.outline,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = DshChrome.labelSubtle,
                     maxLines = 1,
                 )
             }
@@ -170,7 +171,7 @@ fun SelectionText(text: String, mono: Boolean = false) {
 fun NoticeRow(
     icon: ImageVector,
     text: String,
-    tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    tint: Color = DshChrome.label,
     detailed: Boolean = false,
 ) {
     var detail by remember { mutableStateOf(false) }
@@ -354,7 +355,7 @@ fun ToolCard(data: ToolChatData, cwd: String?) {
         ToolRowState.ERROR ->
             if (model.variant == ToolRowVariant.CODE) Color(0xFFE08600) else MaterialTheme.colorScheme.error
         ToolRowState.STOPPED -> Color(0xFFE08600)
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
+        else -> DshChrome.label
     }
     val icon = when (model.state) {
         ToolRowState.ERROR -> Icons.Default.Warning

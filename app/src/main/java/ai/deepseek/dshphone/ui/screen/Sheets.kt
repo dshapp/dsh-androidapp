@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.*
@@ -140,6 +141,146 @@ fun ModelPickerSheet(model: PhoneModel, sessionId: SessionId, onDismiss: () -> U
 
 // —— 上下文明细 ————————————————————————————————————————————
 
+/** contextBreakdown 投影的三段启发式读数（与 Mac ContextBreakdownReading 同构）。 */
+private data class ContextBreakdown(val system: Double, val tools: Double, val messages: Double) {
+    val total: Double get() = system + tools + messages
+}
+
+private fun contextBreakdown(store: SessionStore): ContextBreakdown? {
+    val obj = store.projectionValue("contextBreakdown").obj ?: return null
+    return ContextBreakdown(
+        obj["systemTokens"].dbl ?: 0.0,
+        obj["toolsTokens"].dbl ?: 0.0,
+        obj["messageTokens"].dbl ?: 0.0,
+    )
+}
+
+private data class ContextSegment(val color: Color, val fraction: Double)
+
+private val contextSystemTint = Color(0xFF8E8E93)
+private val contextToolsTint = Color(0xFFAF52DE)
+private val contextMessagesTint = Color(0xFF0A84FF)
+
+/**
+ * 条形分段：三段合起来只占主机给出的 percent，比例由启发式明细决定；
+ * 没有明细就画一整段无色的（与 Mac ContextBreakdownPanel.segments 同一条规则）。
+ */
+private fun contextSegments(percent: Int, breakdown: ContextBreakdown?, plain: Color): List<ContextSegment> {
+    val fraction = (percent / 100.0).coerceIn(0.0, 1.0)
+    if (breakdown == null || breakdown.total <= 0) {
+        return if (fraction > 0) listOf(ContextSegment(plain, fraction)) else emptyList()
+    }
+    return listOf(
+        ContextSegment(contextSystemTint, fraction * breakdown.system / breakdown.total),
+        ContextSegment(contextToolsTint, fraction * breakdown.tools / breakdown.total),
+        ContextSegment(contextMessagesTint, fraction * breakdown.messages / breakdown.total),
+    ).filter { it.fraction > 0 }
+}
+
+/** 会话统计读数：有 sessionStats 投影就用投影，否则按已加载窗口折算（同 Mac resolve）。 */
+private data class SessionStatsReading(
+    val turns: Int = 0,
+    val steps: Int = 0,
+    val llmMs: Double = 0.0,
+    val toolMs: Double = 0.0,
+    val ttftMs: Double = 0.0,
+    val ttftSteps: Int = 0,
+    val decodeMs: Double = 0.0,
+    val decodeTokens: Int = 0,
+) {
+    val ttftAverageMs: Double? get() = if (ttftSteps > 0) ttftMs / ttftSteps else null
+    val tokensPerSecond: Double? get() = if (decodeMs > 0) decodeTokens / (decodeMs / 1000) else null
+}
+
+private fun resolveSessionStats(store: SessionStore): SessionStatsReading {
+    store.sessionStats?.let {
+        return SessionStatsReading(
+            it.turns, it.steps, it.llmMs, it.toolMs, it.ttftMs, it.ttftSteps, it.decodeMs, it.decodeTokens,
+        )
+    }
+    val turns = mutableSetOf<Int>()
+    var steps = 0
+    var llmMs = 0.0
+    var toolMs = 0.0
+    var ttftMs = 0.0
+    var ttftSteps = 0
+    var decodeMs = 0.0
+    var decodeTokens = 0
+    store.nodes.forEach { node ->
+        when (node) {
+            is ChatNode.Assistant -> {
+                val step = node.step
+                steps += 1
+                turns.add(step.turn)
+                step.stepStartTime?.let { start ->
+                    llmMs += (step.time - start).coerceAtLeast(0.0)
+                    step.firstTokenTime?.let { first ->
+                        ttftMs += (first - start).coerceAtLeast(0.0)
+                        ttftSteps += 1
+                    }
+                }
+                val output = step.usage?.outputTokens
+                val first = step.firstTokenTime
+                if (first != null && output != null) {
+                    decodeMs += (step.time - first).coerceAtLeast(0.0)
+                    decodeTokens += output
+                }
+            }
+            is ChatNode.Tool -> node.data.result?.let {
+                toolMs += (it.time - node.data.time).coerceAtLeast(0.0)
+            }
+            else -> Unit
+        }
+    }
+    return SessionStatsReading(turns.size, steps, llmMs, toolMs, ttftMs, ttftSteps, decodeMs, decodeTokens)
+}
+
+/** 明细行；section 行是分组标题，自带一个总值。 */
+private data class ContextDetailRow(val label: String, val value: String, val section: Boolean = false)
+
+/**
+ * 预设 + 两组统计（会话统计、Token 用量），逐字段对齐 Mac 的 detailRows：
+ * 会话从未产出的读数不占行，而不是显示一个 0。
+ */
+private fun contextDetailRows(model: PhoneModel, store: SessionStore): List<ContextDetailRow> {
+    val rows = mutableListOf<ContextDetailRow>()
+    store.agentPreset?.let { id ->
+        val name = model.agentPresets.firstOrNull { it.id == id }
+            ?.let { agentPresetDisplayText(it).name } ?: id
+        rows.add(ContextDetailRow(Strings.preset, name))
+    }
+    val stats = resolveSessionStats(store)
+    if (stats.steps > 0) {
+        rows.add(ContextDetailRow(Strings.statsDialogTitle, "", section = true))
+        rows.add(ContextDetailRow(Strings.statsProgress, fmt(Strings.statsCounts, stats.turns, stats.steps)))
+        if (stats.llmMs > 0) rows.add(ContextDetailRow(Strings.statsLlm, formatStatsDuration(stats.llmMs)))
+        if (stats.toolMs > 0) rows.add(ContextDetailRow(Strings.statsTools, formatStatsDuration(stats.toolMs)))
+        stats.ttftAverageMs?.let { rows.add(ContextDetailRow(Strings.statsTtft, formatStatsDuration(it))) }
+        stats.tokensPerSecond?.let {
+            rows.add(ContextDetailRow(
+                Strings.statsDecode,
+                fmt(Strings.messageTokensPerSecond, formatTokensPerSecond(it)),
+            ))
+        }
+    }
+    store.tokenUsage?.let { usage ->
+        val uncached = usage.uncachedInputTokens ?: usage.inputTokens ?: 0
+        val cacheRead = usage.cacheReadTokens ?: 0
+        val cacheWrite = usage.cacheWriteTokens ?: 0
+        val output = usage.outputTokens ?: 0
+        val billed = uncached + cacheRead + cacheWrite
+        if (billed > 0 || output > 0) {
+            rows.add(ContextDetailRow(Strings.statsUsageTitle, tokenCount(billed + output), section = true))
+            cacheHitPercent(usage)?.let { rows.add(ContextDetailRow(Strings.turnUsageCacheHit, "$it%")) }
+            rows.add(ContextDetailRow(Strings.turnUsageInput, tokenCount(uncached)))
+            rows.add(ContextDetailRow(Strings.turnUsageCacheRead, tokenCount(cacheRead)))
+            if (cacheWrite != 0) rows.add(ContextDetailRow(Strings.turnUsageCacheWrite, tokenCount(cacheWrite)))
+            rows.add(ContextDetailRow(Strings.turnUsageOutput, tokenCount(output)))
+        }
+    }
+    return rows
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ContextSheet(model: PhoneModel, sessionId: SessionId, onDismiss: () -> Unit) {
@@ -150,54 +291,125 @@ fun ContextSheet(model: PhoneModel, sessionId: SessionId, onDismiss: () -> Unit)
                 .fillMaxWidth()
                 .heightIn(max = 600.dp)
                 .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp)
                 .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            store?.contextOccupancy?.let { occupancy ->
-                SectionTitle(Strings.context)
-                LabeledRow(Strings.contextUsed, tokenCount(occupancy.usedTokens.toInt()))
-                LabeledRow(Strings.contextWindow, tokenCount(occupancy.contextWindow.toInt()))
-                LabeledRow(Strings.contextOccupancy, "${occupancy.percent}%")
-                store.projectionValue("contextBreakdown").obj?.let { breakdown ->
-                    LabeledRow(Strings.contextSystem, tokenCount((breakdown["systemTokens"].dbl ?: 0.0).toInt()))
-                    LabeledRow(Strings.contextTools, tokenCount((breakdown["toolsTokens"].dbl ?: 0.0).toInt()))
-                    LabeledRow(Strings.contextMessages, tokenCount((breakdown["messageTokens"].dbl ?: 0.0).toInt()))
-                }
-            }
-            store?.sessionStats?.let { stats ->
-                SectionTitle(Strings.stats)
-                LabeledRow(Strings.turns, stats.turns.toString())
-                LabeledRow(Strings.steps, stats.steps.toString())
-                LabeledRow(Strings.statsLlm, formatDuration(stats.llmMs))
-                LabeledRow(Strings.statsTools, formatDuration(stats.toolMs))
-                if (stats.ttftSteps > 0) {
-                    LabeledRow(Strings.statsTtft, formatDuration(stats.ttftMs / stats.ttftSteps))
-                }
-                if (stats.decodeMs > 0) {
-                    LabeledRow(
-                        Strings.statsDecode,
-                        formatTokensPerSecond(stats.decodeTokens / (stats.decodeMs / 1000)) + " tok/s",
+            val occupancy = store?.contextOccupancy
+            if (occupancy != null) {
+                // 百分比夹在 contextAria 的两半之间，让每种语言保留自己的语序。
+                val head = Strings.contextAria.split("%d%%")
+                val before = head.firstOrNull().orEmpty().trim()
+                val after = head.getOrNull(1).orEmpty().trim()
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    if (before.isNotEmpty()) {
+                        Text(before, style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Text("${occupancy.percent}%", style = MaterialTheme.typography.titleSmall)
+                    if (after.isNotEmpty()) {
+                        Text(after, style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        "~${formatTokens(occupancy.usedTokens.toInt())} / " +
+                            formatTokens(occupancy.contextWindow.toInt()),
+                        style = MaterialTheme.typography.titleSmall,
                     )
                 }
+                val breakdown = contextBreakdown(store)
+                val segments = contextSegments(
+                    occupancy.percent, breakdown, MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (segments.isNotEmpty()) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                    ) {
+                        segments.forEach { segment ->
+                            Box(
+                                Modifier
+                                    .weight(segment.fraction.toFloat())
+                                    .fillMaxHeight()
+                                    .background(segment.color),
+                            )
+                        }
+                        // 余量必须有正权重，Row 的 weight 不接受 0。
+                        val rest = (1.0 - segments.sumOf { it.fraction }).coerceAtLeast(0.0001)
+                        Spacer(Modifier.weight(rest.toFloat()))
+                    }
+                }
+                if (breakdown != null) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        LegendRow(Strings.contextSystem, breakdown.system, contextSystemTint)
+                        LegendRow(Strings.contextTools, breakdown.tools, contextToolsTint)
+                        LegendRow(Strings.contextMessages, breakdown.messages, contextMessagesTint)
+                    }
+                }
             }
-            store?.modelDirectory?.current?.let { current ->
-                SectionTitle(Strings.model)
-                LabeledRow(current.provider, current.model)
-                current.reasoningEffort?.let { LabeledRow(Strings.thinkingEffort, it) }
+            val details = store?.let { contextDetailRows(model, it) }.orEmpty()
+            if (details.isNotEmpty()) {
+                HorizontalDivider()
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    details.forEach { DetailRow(it) }
+                }
             }
-            ListItem(
-                modifier = Modifier.clickable {
-                    model.compactContext(sessionId)
-                    onDismiss()
-                },
-                headlineContent = { Text(Strings.compact) },
-                leadingContent = { Icon(Icons.Default.UnfoldLess, null) },
-            )
         }
     }
 }
 
 @Composable
-private fun SectionTitle(text: String) {
+private fun LegendRow(label: String, tokens: Double, color: Color) {
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            Modifier
+                .size(8.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(color),
+        )
+        Text(label, style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.weight(1f))
+        Text("~${formatTokens(tokens.toInt())}", style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun DetailRow(row: ContextDetailRow) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(top = if (row.section) 6.dp else 0.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            row.label,
+            style = if (row.section) MaterialTheme.typography.titleSmall
+            else MaterialTheme.typography.bodyMedium,
+            color = if (row.section) MaterialTheme.colorScheme.onSurface
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(Modifier.weight(1f))
+        Text(row.value, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+    }
+}
+
+@Composable
+internal fun SectionTitle(text: String) {
     Text(
         text,
         Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp),
@@ -207,7 +419,7 @@ private fun SectionTitle(text: String) {
 }
 
 @Composable
-private fun LabeledRow(label: String, value: String) {
+internal fun LabeledRow(label: String, value: String) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -218,118 +430,6 @@ private fun LabeledRow(label: String, value: String) {
         Text(value, style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-}
-
-// —— 设置 ——————————————————————————————————————————————————
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun SettingsSheet(model: PhoneModel, onDismiss: () -> Unit, onScan: () -> Unit) {
-    var renaming by remember { mutableStateOf<ServerProfile?>(null) }
-    var removing by remember { mutableStateOf<ServerProfile?>(null) }
-    var nameDraft by remember { mutableStateOf("") }
-    val statusText = when (val connection = model.connection) {
-        is Connection.Connected ->
-            if (model.socketState == ai.deepseek.dshphone.net.WsConnectionState.RECONNECTING) Strings.reconnecting
-            else Strings.statusConnected
-        is Connection.Connecting -> Strings.statusConnecting
-        is Connection.Idle -> Strings.statusIdle
-        is Connection.Failed -> connection.message
-    }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .heightIn(max = 620.dp)
-                .verticalScroll(rememberScrollState())
-                .padding(bottom = 24.dp),
-        ) {
-            SectionTitle(Strings.servers)
-            model.profiles.profiles.forEach { profile ->
-                ListItem(
-                    modifier = Modifier.clickable { model.connect(profile) },
-                    headlineContent = { Text(profile.name) },
-                    supportingContent = { Text(profile.relayHost) },
-                    trailingContent = {
-                        Row(verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (profile.id == model.profiles.currentId) {
-                                Box(
-                                    Modifier
-                                        .size(8.dp)
-                                        .clip(CircleShape)
-                                        .background(
-                                            if (model.connection is Connection.Connected) Color(0xFF2E7D32)
-                                            else Color(0xFFE08600)
-                                        )
-                                )
-                                Icon(Icons.Default.Check, null, tint = MaterialTheme.colorScheme.primary)
-                            }
-                            IconButton(onClick = { nameDraft = profile.name; renaming = profile }) {
-                                Icon(Icons.Default.Edit, Strings.serverRename, Modifier.size(18.dp))
-                            }
-                            IconButton(onClick = { removing = profile }) {
-                                Icon(Icons.Default.Delete, Strings.serverRemove, Modifier.size(18.dp))
-                            }
-                        }
-                    },
-                )
-            }
-            Text(
-                Strings.serversFooter,
-                Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            model.profiles.current?.let { profile ->
-                SectionTitle(Strings.currentServer)
-                LabeledRow(Strings.relay, profile.relayHost)
-                LabeledRow(Strings.deviceId, profile.deviceId)
-                LabeledRow(Strings.status, statusText)
-                profile.lastConnectedAt?.let {
-                    LabeledRow(
-                        Strings.lastConnected,
-                        java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
-                            .format(java.util.Date(it)),
-                    )
-                }
-                LabeledRow(Strings.sessionsCount, model.listStore.sessions.size.toString())
-            }
-            ListItem(
-                modifier = Modifier.clickable { onDismiss(); onScan() },
-                headlineContent = { Text(Strings.rescan) },
-                leadingContent = { Icon(Icons.Default.QrCodeScanner, null) },
-            )
-        }
-    }
-    removing?.let { profile ->
-        AlertDialog(
-            onDismissRequest = { removing = null },
-            title = { Text(Strings.serverRemove) },
-            text = { Text("${profile.name} · ${Strings.serverRemoveMessage}") },
-            confirmButton = {
-                TextButton(onClick = {
-                    model.profiles.remove(profile.id)
-                    removing = null
-                }) { Text(Strings.remove) }
-            },
-            dismissButton = { TextButton(onClick = { removing = null }) { Text(Strings.cancel) } },
-        )
-    }
-    renaming?.let { profile ->
-        AlertDialog(
-            onDismissRequest = { renaming = null },
-            title = { Text(Strings.serverRename) },
-            text = { OutlinedTextField(nameDraft, { nameDraft = it }, singleLine = true) },
-            confirmButton = {
-                TextButton(onClick = {
-                    model.profiles.rename(profile.id, nameDraft)
-                    renaming = null
-                }) { Text(Strings.submit) }
-            },
-            dismissButton = { TextButton(onClick = { renaming = null }) { Text(Strings.cancel) } },
-        )
     }
 }
 
@@ -395,7 +495,11 @@ fun NewSessionSheet(model: PhoneModel, onDismiss: () -> Unit, onCreated: (Sessio
         model.agentPresets.firstOrNull { it.id == presetId }?.let { agentPresetDisplayText(it).name } ?: presetId
     } ?: Strings.preset
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    // 背景跟转写页、列表页同一层底色，别让这张表单自成一色（底部输入区本来就画 background）。
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.background,
+    ) {
         Column(
             Modifier
                 .fillMaxWidth()
@@ -438,7 +542,8 @@ fun NewSessionSheet(model: PhoneModel, onDismiss: () -> Unit, onCreated: (Sessio
                 }
             }
             sessionId?.let { id ->
-                ComposerBar(model, id) { created -> onCreated(created) }
+                // 新建会话就是为了马上说话：输入框自动拿焦点、直接把键盘顶起来。
+                ComposerBar(model, id, autoFocus = true) { created -> onCreated(created) }
             }
         }
     }
@@ -527,8 +632,6 @@ fun SessionPanelSheet(
     val scope = rememberCoroutineScope()
     val store = model.sessions[sessionId]
     var subagents by remember { mutableStateOf<List<SubagentListEntry>>(emptyList()) }
-    var goalDraft by remember { mutableStateOf("") }
-    var editingGoal by remember { mutableStateOf(false) }
 
     LaunchedEffect(sessionId) { subagents = model.loadSubagents(sessionId) }
 
@@ -550,46 +653,6 @@ fun SessionPanelSheet(
                 .verticalScroll(rememberScrollState())
                 .padding(bottom = 24.dp),
         ) {
-            SectionTitle(Strings.goal)
-            val goal = store?.goal
-            if (goal != null) {
-                Text(goal.objective, Modifier.padding(horizontal = 16.dp),
-                    style = MaterialTheme.typography.bodyMedium)
-                LabeledRow(Strings.status, goal.phase)
-                goal.blockedMessage?.let {
-                    Text(it, Modifier.padding(horizontal = 16.dp),
-                        style = MaterialTheme.typography.bodySmall, color = Color(0xFFE08600))
-                }
-                Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = { model.toggleGoalPause(sessionId) }) {
-                        Text(if (goal.phase == "paused") Strings.goalResume else Strings.goalPause)
-                    }
-                    TextButton(onClick = { model.clearGoal(sessionId) }) { Text(Strings.goalClear) }
-                }
-            } else if (editingGoal) {
-                OutlinedTextField(
-                    goalDraft, { goalDraft = it },
-                    label = { Text(Strings.goalObjective) },
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                )
-                TextButton(
-                    onClick = {
-                        if (goalDraft.isNotBlank()) {
-                            model.createGoal(goalDraft.trim(), null, sessionId)
-                            goalDraft = ""
-                            editingGoal = false
-                        }
-                    },
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                ) { Text(Strings.submit) }
-            } else {
-                ListItem(
-                    modifier = Modifier.clickable { editingGoal = true },
-                    headlineContent = { Text(Strings.goalNew) },
-                    leadingContent = { Icon(Icons.Default.Flag, null) },
-                )
-            }
-
             store?.todos?.takeIf { it.isNotEmpty() }?.let { todos ->
                 SectionTitle(Strings.todos)
                 todos.forEach { todo ->

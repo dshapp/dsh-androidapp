@@ -113,6 +113,13 @@ class StreamCoordinator(
         )
     }
 
+    /** 重开一条 follow：流失败后重试基线用（subscribe 幂等，失败的那条得先撤掉）。 */
+    fun refollow(sessionId: SessionId) {
+        val address = followAddresses[sessionId] ?: SessionAddress.Session(sessionId)
+        unfollow(sessionId)
+        follow(sessionId, address)
+    }
+
     fun unfollow(sessionId: SessionId) {
         followAddresses.remove(sessionId)
         assistantExpectations.remove(sessionId)

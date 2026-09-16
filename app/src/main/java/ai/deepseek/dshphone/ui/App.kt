@@ -5,6 +5,7 @@ import ai.deepseek.dshphone.state.PairingPayload
 import ai.deepseek.dshphone.ui.screen.ChatScreen
 import ai.deepseek.dshphone.ui.screen.OnboardingScreen
 import ai.deepseek.dshphone.ui.screen.PairingScreen
+import ai.deepseek.dshphone.ui.screen.ServersScreen
 import ai.deepseek.dshphone.ui.screen.SessionListScreen
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -38,9 +39,16 @@ fun DshApp(model: PhoneModel, deepLink: String?) {
                 SessionListScreen(
                     model = model,
                     onOpenSession = { navController.navigate("chat/$it") },
-                    onScan = { scanning = true },
+                    onOpenServers = { navController.navigate("servers") },
                 )
             }
+        }
+        composable("servers") {
+            ServersScreen(
+                model = model,
+                onBack = { navController.popBackStack() },
+                onScan = { scanning = true },
+            )
         }
         composable("chat/{sessionId}") { entry ->
             val sessionId = entry.arguments?.getString("sessionId") ?: return@composable

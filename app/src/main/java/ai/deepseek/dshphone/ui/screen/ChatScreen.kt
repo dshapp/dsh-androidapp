@@ -37,6 +37,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.interaction.DragInteraction
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /** 会话页：转写 + 底部输入条 + 审批/提问表单。 */
@@ -77,12 +79,23 @@ fun ChatScreen(
 
     LaunchedEffect(sessionId) { model.open(sessionId) }
 
+    // 屏幕上此刻显示的是哪条会话，交给通知判定用（对齐 Mac 的 visibleSessionId）：
+    // 会话页在场就是它，退回列表就没有了。收尾前先比一次——跳去另一条会话时，
+    // 新页进场会早于本页退场，不比就会把新页刚写下的那条抹掉。
+    DisposableEffect(sessionId) {
+        model.visibleSessionId = sessionId
+        onDispose { if (model.visibleSessionId == sessionId) model.visibleSessionId = null }
+    }
+
     // 系统返回键：查找态先退出查找，再退出会话（与标题栏返回同一口径）。
     BackHandler(enabled = finding) { exitFind() }
 
     LaunchedEffect(finding) { if (finding) findFocus.requestFocus() }
 
     val nodes = store?.nodes ?: emptyList()
+    // 已插队、主机还没在步骤边界取走的消息：画在转写尾部，别让它在队列条上消失后无处可寻
+    // （对齐 web 的 PendingSteeringBubble / Mac 的 ConversationRoot.pendingSteering）。
+    val pendingSteering = store?.steering ?: emptyList()
     val visibleNodes = remember(nodes, finding, findQuery) {
         // 画不出内容的行不占列表项，否则 spacedBy 会在原地留一道空隙，
         // 贴底滚动也会停在一行看不见的东西上。
@@ -100,16 +113,49 @@ fun ChatScreen(
         }
     }
 
-    // 首次加载直接落到最新一行；之后只在读者本来就贴着底时才跟随。
+    // 是否跟随最新内容：打开会话、发出消息、点「回到底部」时打开；用户自己往上滚就关掉。
+    var followTail by remember(sessionId) { mutableStateOf(true) }
+
+    // 首次加载直接落到最新一行。
     var settledInitialScroll by remember(sessionId) { mutableStateOf(false) }
-    LaunchedEffect(visibleNodes.size) {
-        if (visibleNodes.isEmpty()) return@LaunchedEffect
-        if (!settledInitialScroll) {
-            listState.scrollToItem(visibleNodes.size - 1)
-            settledInitialScroll = true
-            return@LaunchedEffect
+    LaunchedEffect(visibleNodes.size, pendingSteering.size) {
+        if ((visibleNodes.isEmpty() && pendingSteering.isEmpty()) || settledInitialScroll) return@LaunchedEffect
+        // 末行本身可能比屏幕还高，offset 给到上限会把请求钳在最大滚动位置，
+        // 也就是真正的内容底部，而不是把它顶到视口上沿（只露出这段回复的开头）。
+        listState.scrollToItem(visibleNodes.size + pendingSteering.size - 1, scrollOffset = Int.MAX_VALUE)
+        settledInitialScroll = true
+    }
+
+    // 跟随尾部。
+    //
+    // 不能拿节点数量当信号：流式回复期间行数一直不变，变的是最后一行的高度，
+    // size 没变就不会再触发滚动——表现就是回复写着写着就不跟了。这里改看
+    // canScrollForward：只要底下还有没露出来的内容就立刻贴回底部，
+    // 行数增加与单行变高都能覆盖。
+    LaunchedEffect(listState, followTail, settledInitialScroll) {
+        if (!followTail || !settledInitialScroll) return@LaunchedEffect
+        snapshotFlow { listState.canScrollForward }.collect { canForward ->
+            // 手正在拖/惯性还在滑的时候不抢：让手势跑完，落点交给上面的收集器判断。
+            if (!canForward || !followTail || listState.isScrollInProgress) return@collect
+            val last = listState.layoutInfo.totalItemsCount - 1
+            if (last >= 0) listState.scrollToItem(last, scrollOffset = Int.MAX_VALUE)
         }
-        if (atBottom) listState.animateScrollToItem(visibleNodes.size - 1)
+    }
+
+    // 用户手一碰列表就停止跟随；手势（含松手后的惯性）把列表带回底部后再恢复跟随。
+    LaunchedEffect(listState, settledInitialScroll) {
+        if (!settledInitialScroll) return@LaunchedEffect
+        listState.interactionSource.interactions.collect { interaction ->
+            when (interaction) {
+                is DragInteraction.Start -> followTail = false
+                is DragInteraction.Stop, is DragInteraction.Cancel -> {
+                    // 松手那一下可能还在惯性里滑，等真的停下来再按落点判断。
+                    snapshotFlow { listState.isScrollInProgress }.first { !it }
+                    if (!listState.canScrollForward) followTail = true
+                }
+                else -> Unit
+            }
+        }
     }
 
     // 贴底就是最新一轮，否则取阅读线之上最近的带轮次行（与 iOS 的几何判定同义）。
@@ -227,6 +273,8 @@ fun ChatScreen(
                                     enabled = railBusyTurn == null,
                                     onClick = {
                                         turnMenu = false
+                                        // 跳去历史轮次是明确的"往上读"，别再自动跟回底部。
+                                        followTail = false
                                         haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                         scope.launch {
                                             railBusyTurn = item.turn
@@ -267,7 +315,15 @@ fun ChatScreen(
             ComposerBar(
                 model = model,
                 sessionId = sessionId,
-                onSubmitted = {},
+                // 发出消息就重新打开跟随并立刻贴底：用户刚才停在哪儿都不重要，
+                // 新消息要出现在眼前，之后一路跟到底。
+                onSubmitted = {
+                    followTail = true
+                    scope.launch {
+                        val last = listState.layoutInfo.totalItemsCount - 1
+                        if (last >= 0) listState.scrollToItem(last, scrollOffset = Int.MAX_VALUE)
+                    }
+                },
             )
         },
     ) { padding ->
@@ -348,13 +404,32 @@ fun ChatScreen(
                         }
                     }
                 }
+                // 已插队的消息：排在全部转写节点之后，直到主机在下一个步骤边界把它取走；
+                // 一取走它就变成正式的用户/steering 节点，这里同步消失（队列帧与事件一起到）。
+                items(pendingSteering.size, key = { "pending-steer:" + pendingSteering[it].id }) { index ->
+                    val item = pendingSteering[index]
+                    MessageRow(
+                        node = ChatNode.Steering(
+                            seq = store?.lastSeq ?: 0,
+                            time = 0.0,
+                            messageId = item.id,
+                            content = item.content.map { decodeContentBlock(it) },
+                        ),
+                        cwd = cwd,
+                        sessionId = sessionId,
+                        model = model,
+                        store = store,
+                        onOpenFile = { preview = it },
+                        onFork = {},
+                    )
+                }
             }
 
             // 转写的三种"没内容"形态只认基线：基线还在路上一律转圈，
             // 只有真的拿到了基线还是零节点才算空会话，取不回来则报错并给重试。
             val historyError = store?.historyError
             when {
-                nodes.isNotEmpty() -> Unit
+                nodes.isNotEmpty() || pendingSteering.isNotEmpty() -> Unit
                 historyError != null -> Column(
                     Modifier
                         .align(Alignment.Center)
@@ -384,7 +459,11 @@ fun ChatScreen(
                     .padding(16.dp),
             ) {
                 SmallFloatingActionButton(onClick = {
-                    scope.launch { listState.animateScrollToItem(visibleNodes.size - 1) }
+                    followTail = true
+                    scope.launch {
+                        val last = listState.layoutInfo.totalItemsCount - 1
+                        if (last >= 0) listState.scrollToItem(last, scrollOffset = Int.MAX_VALUE)
+                    }
                 }) { Icon(Icons.Default.ArrowDownward, Strings.scrollToBottom) }
             }
         }

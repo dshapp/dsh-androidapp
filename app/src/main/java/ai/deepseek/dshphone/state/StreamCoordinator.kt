@@ -32,6 +32,8 @@ class StreamCoordinator(
     private val resyncHandler: () -> Unit,
     private val gapRepairLoader: suspend (SessionAddress, Int) -> SessionHistoryValue,
     private val attentionHandler: (AttentionSignal) -> Unit,
+    /** 会话运行状态变过一次：宿主据此决定要不要起常驻的前台服务。 */
+    private val runActivityHandler: () -> Unit = {},
 ) {
     companion object {
         private const val TAG = "StreamCoordinator"
@@ -215,6 +217,7 @@ class StreamCoordinator(
                 val running = args.getOrNull(1).bool ?: return
                 listStore.setRunning(sessionId, running)
                 sessionLookup(sessionId)?.running = running
+                runActivityHandler()
                 attentionHandler(AttentionSignal.Running(sessionId, running))
             }
             "api-session/activity" -> {
@@ -432,6 +435,15 @@ sealed interface AttentionSignal {
     data class ApprovalRequested(val approval: ai.deepseek.dshphone.model.ApprovalRequested) : AttentionSignal
     data class QuestionAsked(val question: QuestionRequested) : AttentionSignal
     data class WaterfallRetired(val sessionId: SessionId, val eventId: String) : AttentionSignal
+    /**
+     * 会话从"运行"落回"停止"的完成事实。
+     *
+     * [Running] 那张边沿只存在 [StreamCoordinator] 处理 `\$events` 实时帧的那一刻；
+     * 后台/断线期间错过的帧不会有第二次机会。而列表层每次基线刷新都会把上一次记下的
+     * running 与基线里的 running 比一遍，于是这条"从基线里补出来的完成边沿"由
+     * [ai.deepseek.dshphone.state.SessionListStore] 产出，交给同一套通知判定。
+     */
+    data class SessionCompleted(val sessionId: SessionId) : AttentionSignal
 }
 
 /** 只有真正的人类消息才推进会话活跃时间。 */

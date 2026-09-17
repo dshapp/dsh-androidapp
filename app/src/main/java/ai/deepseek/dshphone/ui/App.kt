@@ -1,11 +1,14 @@
 package ai.deepseek.dshphone.ui
 
+import ai.deepseek.dshphone.LaunchRequest
+import ai.deepseek.dshphone.state.Connection
 import ai.deepseek.dshphone.state.PhoneModel
 import ai.deepseek.dshphone.state.PairingPayload
 import ai.deepseek.dshphone.ui.screen.ChatScreen
+import ai.deepseek.dshphone.ui.screen.NewSessionScreen
 import ai.deepseek.dshphone.ui.screen.OnboardingScreen
 import ai.deepseek.dshphone.ui.screen.PairingScreen
-import ai.deepseek.dshphone.ui.screen.ServersScreen
+import ai.deepseek.dshphone.ui.screen.SettingsScreen
 import ai.deepseek.dshphone.ui.screen.SessionListScreen
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -18,17 +21,43 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 
 @Composable
-fun DshApp(model: PhoneModel, deepLink: String?) {
+fun DshApp(model: PhoneModel, launch: LaunchRequest?, onLaunchHandled: () -> Unit = {}) {
     val navController = rememberNavController()
     var scanning by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { model.connectCurrent() }
 
-    LaunchedEffect(deepLink) {
-        val payload = deepLink ?: return@LaunchedEffect
-        val profile = model.profiles.add(PairingPayload.suggestedName(payload), payload) ?: return@LaunchedEffect
-        scanning = false
-        model.connect(profile)
+    LaunchedEffect(launch) {
+        val payload = launch?.deepLink ?: return@LaunchedEffect
+        val profile = model.profiles.add(PairingPayload.suggestedName(payload), payload)
+        if (profile != null) {
+            scanning = false
+            model.connect(profile)
+        }
+        // 消费放在最后：清掉待办会让这个 effect 带着新 key 重启，提前清就是在给自己
+        // 的后半截安排一次取消。链接解析不出来也照样消费，否则它会一直挂着。
+        onLaunchHandled()
+    }
+
+    // 通知卡片点进来的那条会话：等这次连接有了结论再落地。
+    //
+    // 不能一收到就导航：冷启动时 connectCurrent 还在飞，它的第一步 teardown 会清空
+    // sessions 与 selectedSessionId，抢在它前面开出来的那份 store 会被一起清掉；而会话
+    // 页只在进场时 open 一次，于是转写就永远停在空白。等一等，对齐 Mac 把点击先缓存在
+    // router 里、boot 跑完才 drainPendingOpen 的次序。
+    //
+    // 连不上（Failed）也照样落地：卡片说的是"去看这条会话"，会话页自己带着报错与重试，
+    // 比停在列表上什么都不说要诚实；重连后 follow 会把基线补上。
+    val settled = model.connection is Connection.Connected || model.connection is Connection.Failed
+    LaunchedEffect(launch, settled) {
+        val sessionId = launch?.openSessionId ?: return@LaunchedEffect
+        if (!settled) return@LaunchedEffect
+        navController.navigate("chat/$sessionId") {
+            // 回退键回到会话列表：卡片是"跳到这条会话"，不是在当前这条上再叠一层。
+            popUpTo("root")
+            launchSingleTop = true
+        }
+        onLaunchHandled()
     }
 
     NavHost(navController = navController, startDestination = "root") {
@@ -39,15 +68,28 @@ fun DshApp(model: PhoneModel, deepLink: String?) {
                 SessionListScreen(
                     model = model,
                     onOpenSession = { navController.navigate("chat/$it") },
-                    onOpenServers = { navController.navigate("servers") },
+                    onOpenSettings = { navController.navigate("settings") },
+                    onNewSession = { navController.navigate("new") },
                 )
             }
         }
-        composable("servers") {
-            ServersScreen(
+        composable("settings") {
+            SettingsScreen(
                 model = model,
                 onBack = { navController.popBackStack() },
                 onScan = { scanning = true },
+            )
+        }
+        composable("new") {
+            NewSessionScreen(
+                model = model,
+                onBack = { navController.popBackStack() },
+                // 发出第一条消息后这页就没用了：换成会话页，返回键直接回到列表。
+                onCreated = {
+                    navController.navigate("chat/$it") {
+                        popUpTo("new") { inclusive = true }
+                    }
+                },
             )
         }
         composable("chat/{sessionId}") { entry ->

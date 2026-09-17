@@ -28,8 +28,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -86,19 +88,36 @@ private fun UserBubble(content: List<ContentBlock>, sessionId: SessionId, model:
     ) {
         images.forEach { ref -> AttachmentImage(sessionId, ref, model) }
         if (text.isNotEmpty()) {
-            androidx.compose.foundation.text.selection.SelectionContainer {
-                Text(
-                    text,
-                    modifier = Modifier
-                        .widthIn(max = bubbleMaxWidth)
-                        .background(
-                            MaterialTheme.colorScheme.primaryContainer,
-                            RoundedCornerShape(Dimens.bubbleRadius),
-                        )
-                        .padding(horizontal = 14.dp, vertical = 9.dp),
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                )
+            // 点气泡弹出「复制」小泡泡，一键复制整句；长按仍走系统文本选择。
+            var copyMenu by remember(text) { mutableStateOf(false) }
+            val clipboard = LocalClipboardManager.current
+            val haptics = LocalHapticFeedback.current
+            Box(Modifier.clickable { copyMenu = true }) {
+                androidx.compose.foundation.text.selection.SelectionContainer {
+                    Text(
+                        text,
+                        modifier = Modifier
+                            .widthIn(max = bubbleMaxWidth)
+                            .background(
+                                MaterialTheme.colorScheme.primaryContainer,
+                                RoundedCornerShape(Dimens.bubbleRadius),
+                            )
+                            .padding(horizontal = 14.dp, vertical = 9.dp),
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                }
+                DropdownMenu(copyMenu, { copyMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text(Strings.copy) },
+                        leadingIcon = { Icon(Icons.Default.ContentCopy, null) },
+                        onClick = {
+                            copyMenu = false
+                            clipboard.setText(AnnotatedString(text))
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        },
+                    )
+                }
             }
         }
     }

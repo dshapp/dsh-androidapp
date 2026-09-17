@@ -108,6 +108,19 @@ class SessionStore(val sessionId: SessionId) {
         private set
     var queue by mutableStateOf<List<QueuedInboxItem>>(emptyList())
         private set
+    /**
+     * 队列条只吃这一份：主机的 next-turn 项，也就是下一轮才会被取走的消息。
+     *
+     * `queue` 里还混着 next-step 的项（placement == "steering"）：那些是已经点了
+     * "插队发送"、正等着在下一个步骤边界送进当前回合的消息。它们不属于"排队"，
+     * 画在队列条里就会和排队项长得一模一样（见 ComposerBar.QueueStrip 的说明）。
+     * 与 web 的 queue filter / Mac 的 QueueDock.queued / Mac 手机端 PhoneQueueStrip 同口径。
+     */
+    val queued: List<QueuedInboxItem> get() = queue.filter { it.placement == "queued" }
+
+    /** 已插队、等主机在下一个步骤边界取走的消息；画在转写尾部（对齐 web 的 PendingSteeringBubble）。 */
+    val steering: List<QueuedInboxItem> get() = queue.filter { it.placement == "steering" }
+
     var jobs by mutableStateOf<List<JobView>>(emptyList())
         private set
 

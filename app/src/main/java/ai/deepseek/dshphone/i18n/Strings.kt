@@ -1,15 +1,30 @@
 package ai.deepseek.dshphone.i18n
 
+import androidx.compose.runtime.mutableStateOf
 import java.util.Locale
 
-/** 界面语言：跟随系统，中文优先回退（与 iOS 的 AppLocale 同口径）。 */
+/**
+ * 应用实际支持的界面语言（与 iOS 的 AppLocale 同口径）。
+ *
+ * 偏好里"跟随系统"是缺省而不是这一种的成员：跟着系统时具体落到哪一种由
+ * [Strings.resolve] 按系统语言算，设备语言不是中/英时中文优先回退。
+ */
 enum class AppLocale { EN, ZH }
 
 object Strings {
-    @Volatile
-    var locale: AppLocale = resolve()
+    /**
+     * 生效中的界面语言。写成 Compose 状态而不是普通字段：所有文案都从这个单例上读，
+     * 切换语言时读过的组合会自动重组，不必靠重建整棵界面去刷新。
+     */
+    private val localeState = mutableStateOf(resolve())
 
-    private fun resolve(): AppLocale {
+    /** 当前语言；设置页选"跟随系统"时由系统语言解析而来。 */
+    var locale: AppLocale
+        get() = localeState.value
+        set(value) { localeState.value = value }
+
+    /** 系统语言决定的那一种（中文优先回退，与 iOS 的 AppLocale 同口径）。 */
+    fun resolve(): AppLocale {
         val tag = Locale.getDefault().language.lowercase()
         return if (tag == "en") AppLocale.EN else AppLocale.ZH
     }
@@ -28,6 +43,16 @@ object Strings {
     val connect: String get() = pick("Connect", "连接")
     val settings: String get() = pick("Settings", "设置")
     val servers: String get() = pick("Servers", "服务")
+    // 设置页「外观」区：语言与主题都是本机偏好，跟连接哪台 Mac 无关。
+    val appearance: String get() = pick("Appearance", "外观")
+    val language: String get() = pick("Language", "语言")
+    val languageSystem: String get() = pick("System default", "跟随系统")
+    val languageEnglish: String get() = pick("English", "英语")
+    val languageChinese: String get() = pick("简体中文", "简体中文")
+    val theme: String get() = pick("Theme", "主题")
+    val themeSystem: String get() = pick("System default", "跟随系统")
+    val themeLight: String get() = pick("Light", "浅色")
+    val themeDark: String get() = pick("Dark", "深色")
     val currentServer: String get() = pick("Current Server", "当前服务")
     val relay: String get() = pick("Relay", "中转")
     val deviceId: String get() = pick("This device", "本机设备")
@@ -40,7 +65,6 @@ object Strings {
     val serverName: String get() = pick("Server name", "电脑名称")
     val serverRename: String get() = pick("Rename Server", "重命名服务")
     val serverNameFooter: String get() = pick("Name this Desktop however you like; it is only shown on this device.", "给这台电脑标个名字，只在本机显示。")
-    val serversFooter: String get() = pick("Tap to switch. Use the row buttons to rename or remove a pairing on this device.", "点按切换；用右侧按钮重命名或从本机移除配对。")
     val addServer: String get() = pick("Add Server", "添加新服务")
     val noSessions: String get() = pick("No sessions yet", "还没有会话")
     val untitledSession: String get() = pick("Untitled session", "未命名会话")
@@ -115,6 +139,10 @@ object Strings {
     val queueEdit: String get() = pick("Edit queued message", "编辑排队消息")
     val queueSteer: String get() = pick("Send now", "插队发送")
     val queueRemove: String get() = pick("Remove", "撤回")
+    // 失败提示只在"用户还能做点什么"时出现：插队发送的竞态（行已被取走）静默收敛，见 PhoneModel.queueMutation。
+    val queueEditFailed: String get() = pick("Could not edit the queued message. Try again.", "编辑排队消息失败，请重试。")
+    val queueRemoveFailed: String get() = pick("Could not remove the queued message. Try again.", "移除排队消息失败，请重试。")
+    val queueSteerFailed: String get() = pick("Steering failed. Try again.", "插话发送失败，请重试。")
     val forkHere: String get() = pick("Fork from here", "从此处分支")
     val subagentComposer: String get() = pick("Messages go to this subagent", "消息将发给这个子智能体")
     val subagentReadOnly: String get() = pick("One-shot subagent — read only", "一次性子智能体，仅可查看")
@@ -158,6 +186,7 @@ object Strings {
     val allSessions: String get() = pick("Sessions", "会话")
     val ungrouped: String get() = pick("Other", "其他")
     val viewOptions: String get() = pick("View options", "视图选项")
+    val reorderGroups: String get() = pick("Touch and hold to reorder groups", "长按拖动调整分组顺序")
     val disconnected: String get() = pick("Not connected", "未连接")
     val showMore: String get() = pick("Show %d more", "再显示 %d 个")
     val approve: String get() = pick("Approve once", "本次允许")
@@ -200,6 +229,16 @@ object Strings {
     val durationSeconds: String get() = pick("%ds", "%d秒")
     val durationMinutes: String get() = pick("%dm %02ds", "%d分%02d秒")
     val questionRecommended: String get() = pick("Recommended", "推荐")
+    val questionPrev: String get() = pick("Previous question", "上一题")
+    val questionNext: String get() = pick("Next question", "下一题")
+    val questionActionNext: String get() = pick("Next", "下一题")
+    val questionCancel: String get() = pick("Dismiss all questions", "放弃整组问题")
+    val questionCustomPlaceholder: String get() = pick("Type your answer", "输入你的答案")
+    val questionErrorUnanswered: String get() =
+        pick("Please select an option or enter a custom answer.", "请选择一个选项或填写自定义答案。")
+    val questionErrorIncomplete: String get() = pick("Please complete this question first.", "请先完成这道问题。")
+    /** 逐题分页的进度，如 "2 / 3"。 */
+    val questionProgress: String get() = pick("%d / %d", "%d / %d")
     val questionPlanHeader: String get() = pick("Plan review", "计划待审")
     val questionPlanApprove: String get() = pick("Approve", "确认执行")
     val questionPlanApproveWithNotes: String get() = pick("Submit Notes", "提交修改")
@@ -234,6 +273,10 @@ object Strings {
     val notifyQuestion: String get() = pick("Needs an answer", "需要回答")
     val notifyDone: String get() = pick("Turn finished", "这一轮已完成")
     val notifyFailed: String get() = pick("Turn failed", "这一轮失败")
+    val notifyServiceRunning: String get() =
+        pick("Keeping the connection alive for running tasks", "正在为运行中的任务保持连接")
+    val notifyServiceDescription: String get() =
+        pick("Shown while a task is running.", "任务运行期间常驻，避免系统冻结后台连接。")
 }
 
 /** t() 风格的格式化：把 %d/%s 占位符填上。 */

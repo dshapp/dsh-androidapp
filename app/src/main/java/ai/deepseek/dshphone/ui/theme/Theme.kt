@@ -1,5 +1,6 @@
 package ai.deepseek.dshphone.ui.theme
 
+import ai.deepseek.dshphone.state.AppThemeMode
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
@@ -45,8 +46,17 @@ object DshChrome {
 private val LightScheme = lightColorScheme(primary = Color(0xFF1C64F2))
 private val DarkScheme = darkColorScheme(primary = Color(0xFF7FA8FF))
 
+/**
+ * 主题入口。深浅由设置页的主题偏好在组合时解出（跟随系统 / 强制浅色 / 强制深色），
+ * 只在 API 31+ 之上仍交给系统的动态取色决定具体色板。
+ */
 @Composable
-fun DshTheme(darkTheme: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
+fun DshTheme(theme: AppThemeMode = AppThemeMode.SYSTEM, content: @Composable () -> Unit) {
+    val darkTheme = when (theme) {
+        AppThemeMode.SYSTEM -> isSystemInDarkTheme()
+        AppThemeMode.LIGHT -> false
+        AppThemeMode.DARK -> true
+    }
     val context = LocalContext.current
     val scheme = when {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->

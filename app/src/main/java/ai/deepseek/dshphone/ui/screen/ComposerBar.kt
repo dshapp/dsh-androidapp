@@ -2,6 +2,7 @@ package ai.deepseek.dshphone.ui.screen
 
 import ai.deepseek.dshphone.i18n.Strings
 import ai.deepseek.dshphone.model.*
+import ai.deepseek.dshphone.net.MessageId
 import ai.deepseek.dshphone.net.SessionId
 import ai.deepseek.dshphone.net.dbl
 import ai.deepseek.dshphone.net.get
@@ -75,6 +76,8 @@ fun ComposerBar(
     model: PhoneModel,
     sessionId: SessionId,
     autoFocus: Boolean = false,
+    /** 贴在输入区最上面的一行附加内容（新建会话页用来放工作区/预设胶囊）。 */
+    header: (@Composable () -> Unit)? = null,
     onSubmitted: (SessionId) -> Unit,
 ) {
     val context = LocalContext.current
@@ -92,6 +95,22 @@ fun ComposerBar(
     var modelPicker by remember { mutableStateOf(false) }
     var contextSheet by remember { mutableStateOf(false) }
     var pendingFullAccess by remember { mutableStateOf<String?>(null) }
+    /**
+     * 刚发出去的那串文字。
+     *
+     * 发送时我们把 value 改成空串，但输入法手里还攥着旧文字：结束组字/提交的那一下
+     * BasicTextField 会拿旧文字再回调一次 onValueChange，草稿于是被写回模型，接着挂载的
+     * 那个输入区（发完消息导航过去的会话页就是）又把它读了出来——看起来就是"发完了还留在
+     * 输入框里"。这里记下刚发出去的内容，紧跟着的第一次原样回灌直接丢掉。
+     */
+    var sentEcho by remember(sessionId) { mutableStateOf<String?>(null) }
+
+    // 回灌只会紧跟着发送发生；超过这一小会儿还没来就不必再防，免得误吞用户重新输入的同一句话。
+    LaunchedEffect(sentEcho) {
+        if (sentEcho == null) return@LaunchedEffect
+        delay(1500)
+        sentEcho = null
+    }
 
     LaunchedEffect(sessionId) { model.loadModels(sessionId) }
 
@@ -135,18 +154,24 @@ fun ComposerBar(
         if (address != null) {
             if (address.mode != SubagentMode.CONTINUABLE) return
             val text = draft.text
+            sentEcho = text
             draft = TextFieldValue("")
             model.setDraft("", sessionId)
-            scope.launch { model.sendToSubagent(text, sessionId) }
+            model.submitToSubagent(text, sessionId)
+            // 子智能体页同样算"发出了新消息"，跟随底部要在那边也重新打开。
+            onSubmitted(sessionId)
             return
         }
         val text = draft.text
         val files = attachments
+        sentEcho = text
         draft = TextFieldValue("")
         attachments = emptyList()
         suggestions = emptyList()
         model.setDraft("", sessionId)
-        scope.launch { model.send(text, sessionId, files) }
+        // 提交交给 model 的 viewModelScope：onSubmitted 会把这张输入区连同它的
+        // rememberCoroutineScope 一起带出 composition，挂在本地 scope 上会被取消。
+        model.submit(text, sessionId, files)
         onSubmitted(sessionId)
     }
 
@@ -161,9 +186,10 @@ fun ComposerBar(
                 .padding(horizontal = Dimens.columnInset, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            header?.invoke()
             TodoStrip(store)
             GoalBar(model, sessionId, store)
-            if (store != null && store.queue.isNotEmpty()) QueueStrip(model, sessionId, store)
+            if (store != null && store.queued.isNotEmpty()) QueueStrip(model, sessionId, store)
             if (suggestions.isNotEmpty()) {
                 SuggestionList(suggestions) { suggestion ->
                     val token = TriggerToken.parse(draft.text)
@@ -196,6 +222,14 @@ fun ComposerBar(
                     value = draft,
                     autoFocus = autoFocus,
                     onValueChange = {
+                        val echo = sentEcho
+                        sentEcho = null
+                        // 输入法把刚发出去的那句原样送了回来：留住空输入框，别写回草稿。
+                        if (echo != null && it.text == echo) {
+                            draft = TextFieldValue("")
+                            model.setDraft("", sessionId)
+                            return@BasicComposerField
+                        }
                         val next = atomicTokenEdit(draft, it)
                         draft = next
                         model.setDraft(next.text, sessionId)
@@ -302,13 +336,9 @@ fun ComposerBar(
                         }
                     } else {
                         IconButton(
-                            onClick = {
-                                if (store?.running == true) {
-                                    val text = draft.text
-                                    draft = TextFieldValue("")
-                                    scope.launch { model.steer(text, sessionId) }
-                                } else send()
-                            },
+                            // 回合在跑时发送就是排队（Mac/web 的 enterBehavior 默认 queue），
+                            // 插队是队列行上那颗单独的按钮——不点它就不该抢进正在跑的回合。
+                            onClick = { send() },
                             enabled = !sendDisabled,
                             modifier = Modifier.size(36.dp),
                         ) {
@@ -684,13 +714,34 @@ private fun GoalBar(model: PhoneModel, sessionId: SessionId, store: SessionStore
     }
 }
 
-/** 排队中的消息：可编辑、插队发送、撤回。 */
+/**
+ * 排队中的消息：可编辑、插队发送、撤回。
+ *
+ * 只画 placement == "queued"（下一轮才会取走的那些），与 Mac 的 QueueDock / web 的队列同口径。
+ * 一旦点了插队发送，主机会把它挪进 next-step，控制流随即推来 placement == "steering" 的帧；
+ * 那一行此刻已经在跑的回合里了，不属于"排队"，必须立刻从这条上消失——否则行文一模一样地留在原地，
+ * 看起来就像按钮没反应（重复点还会撞上主机的 steer-unavailable）。它改由转写尾部的
+ * 待定气泡（ChatScreen 里的 pendingSteering）接管显示。
+ */
 @Composable
 private fun QueueStrip(model: PhoneModel, sessionId: SessionId, store: SessionStore) {
     var editing by remember { mutableStateOf<QueuedInboxItem?>(null) }
     var editDraft by remember { mutableStateOf("") }
+    // 提交中（等主机回声）的那些行先禁掉按钮：避免同一行被连点两次，
+    // 第二次必然撞上 queue-item-not-found。
+    var busy by remember { mutableStateOf<Set<MessageId>>(emptySet()) }
+    val scope = rememberCoroutineScope()
+    // 一行同一时刻只发一个动作；提交中就把这颗按钮禁掉。
+    fun mutate(itemId: MessageId, block: suspend () -> Unit) {
+        if (itemId in busy) return
+        busy = busy + itemId
+        scope.launch {
+            try { block() } finally { busy = busy - itemId }
+        }
+    }
+    val queued = store.queued
     Column(Modifier.fillMaxWidth()) {
-        store.queue.forEachIndexed { index, item ->
+        queued.forEachIndexed { index, item ->
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -703,30 +754,39 @@ private fun QueueStrip(model: PhoneModel, sessionId: SessionId, store: SessionSt
                 Text(item.text, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
-                IconButton(onClick = { editDraft = item.text; editing = item }, modifier = Modifier.size(32.dp)) {
+                IconButton(
+                    onClick = {
+                        editDraft = item.text
+                        editing = item
+                    },
+                    enabled = item.id !in busy,
+                    modifier = Modifier.size(32.dp),
+                ) {
                     Icon(Icons.Default.Edit, Strings.queueEdit, Modifier.size(16.dp))
                 }
-                // 插队发送与 Mac 的 QueueRow 同口径：始终占位，只有回合在跑时才可用，
-                // 免得用户以为这个功能不存在（iOS 是直接隐藏，这里取更清楚的一种）。
+                // 插队发送与 Mac 的 QueueRow 同口径：回合没在跑就没有可插的队，
+                // 此时留位但禁用；提交中同样禁掉，防连点撞上 steer-unavailable。
+                val steerable = store.running && item.id !in busy
                 IconButton(
-                    onClick = { model.steerQueued(item.id, sessionId) },
-                    enabled = store.running,
+                    onClick = { mutate(item.id) { model.steerQueued(item.id, sessionId) } },
+                    enabled = steerable,
                     modifier = Modifier.size(32.dp),
                 ) {
                     Icon(
                         Icons.AutoMirrored.Filled.Send,
                         Strings.queueSteer,
                         Modifier.size(16.dp),
-                        tint = if (store.running) MaterialTheme.colorScheme.onSurfaceVariant
+                        tint = if (steerable) MaterialTheme.colorScheme.onSurfaceVariant
                         else MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
                     )
                 }
                 IconButton(
-                    onClick = { model.removeQueued(item.id, sessionId) },
+                    onClick = { mutate(item.id) { model.removeQueued(item.id, sessionId) } },
+                    enabled = item.id !in busy,
                     modifier = Modifier.size(32.dp),
                 ) { Icon(Icons.Default.Close, Strings.queueRemove, Modifier.size(16.dp)) }
             }
-            if (index < store.queue.size - 1) HorizontalDivider()
+            if (index < queued.size - 1) HorizontalDivider()
         }
     }
     editing?.let { item ->
@@ -736,8 +796,9 @@ private fun QueueStrip(model: PhoneModel, sessionId: SessionId, store: SessionSt
             text = { OutlinedTextField(editDraft, { editDraft = it }) },
             confirmButton = {
                 TextButton(onClick = {
-                    model.editQueued(item.id, editDraft, sessionId)
+                    val text = editDraft
                     editing = null
+                    mutate(item.id) { model.editQueued(item.id, text, sessionId) }
                 }) { Text(Strings.submit) }
             },
             dismissButton = { TextButton(onClick = { editing = null }) { Text(Strings.cancel) } },

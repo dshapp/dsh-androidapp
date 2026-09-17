@@ -25,6 +25,7 @@ import ai.deepseek.dshphone.model.SubagentListEntry
 import ai.deepseek.dshphone.model.SubagentListValue
 import ai.deepseek.dshphone.model.SubagentMode
 import ai.deepseek.dshphone.model.WorkspaceFileTextValue
+import ai.deepseek.dshphone.model.WorkspaceOrderValue
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -198,6 +199,25 @@ suspend fun ApiClient.sessionAttachment(sessionId: SessionId, attachmentId: Atta
 suspend fun ApiClient.workspaceArchiveSession(sessionId: SessionId) {
     call("workspace/archiveSession", request { put("sessionId", sessionId) })
 }
+
+/**
+ * 把一个工作区挪到另一个工作区之前，[beforeWorkspaceId] 为空表示挪到末尾。
+ *
+ * 与 Mac 的 `workspaceInsertBefore` 同一口径：末尾是「不带这个字段」，而不是把它写成
+ * null——主机按字段存在与否区分「插到某个工作区之前」和「插到末尾」。返回的是主机落定
+ * 后的完整顺序，本地据此对齐。
+ */
+suspend fun ApiClient.workspaceInsertBefore(
+    workspaceId: WorkspaceId,
+    beforeWorkspaceId: WorkspaceId? = null,
+): WorkspaceOrderValue =
+    call(
+        "workspace/insertBefore",
+        request {
+            put("workspaceId", workspaceId)
+            beforeWorkspaceId?.let { put("beforeWorkspaceId", it) }
+        },
+    ).decodeOrNull<WorkspaceOrderValue>() ?: throw internalError("workspace/insertBefore returned no value")
 
 suspend fun ApiClient.hostOpenPath(path: String) {
     call("session/openWorkspacePath", request { put("path", path) })

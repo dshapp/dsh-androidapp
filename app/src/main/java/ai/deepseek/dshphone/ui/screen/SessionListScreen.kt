@@ -4,6 +4,7 @@ import ai.deepseek.dshphone.i18n.Strings
 import ai.deepseek.dshphone.i18n.fmt
 import ai.deepseek.dshphone.model.*
 import ai.deepseek.dshphone.net.SessionId
+import ai.deepseek.dshphone.net.WorkspaceId
 import ai.deepseek.dshphone.state.Connection
 import ai.deepseek.dshphone.state.PhoneModel
 import ai.deepseek.dshphone.ui.theme.Dimens
@@ -11,8 +12,14 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListItemInfo
+import androidx.compose.foundation.lazy.LazyListLayoutInfo
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -30,12 +37,16 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.contentDescription
@@ -43,6 +54,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import kotlinx.coroutines.launch
 
 private const val PAGE_SIZE = 60
@@ -51,6 +63,11 @@ private data class SessionGroup(
     val id: String,
     val title: String,
     val sessions: List<SessionSummary>,
+    /**
+     * 只有真实工作区分组才带 id，也只有它们能拖动换位——与 Mac 边栏一致：
+     * 置顶条是本地的一撮会话、「其他」桶根本不是工作区，两者都不参与注册表排序。
+     */
+    val workspaceId: WorkspaceId? = null,
 )
 
 /** 会话列表：搜索 + 可折叠分组 + 视图菜单（分组/排序）。 */
@@ -59,7 +76,8 @@ private data class SessionGroup(
 fun SessionListScreen(
     model: PhoneModel,
     onOpenSession: (SessionId) -> Unit,
-    onOpenServers: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onNewSession: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -70,7 +88,6 @@ fun SessionListScreen(
     var collapsed by remember { mutableStateOf(setOf<String>()) }
     var pages by remember { mutableStateOf(mapOf<String, Int>()) }
     var showArchived by remember { mutableStateOf(false) }
-    var showNewSession by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<SessionSummary?>(null) }
     var renameText by remember { mutableStateOf("") }
     var viewMenu by remember { mutableStateOf(false) }
@@ -97,7 +114,12 @@ fun SessionListScreen(
     LaunchedEffect(finding) { if (finding) findFocus.requestFocus() }
 
     val searching = finding && query.isNotBlank()
-    val listed = model.listStore.sessions.filter { !it.blank }
+    // 与 Mac 边栏的 sessionVisible 同一口径：
+    // - 空白会话是"新建会话"的占位，手机上没有这个页面，不该占一行；
+    // - origin == "subagent" 的会话是某个会话派生出来的子智能体，它只在父会话的
+    //   子智能体面板里露面，列成顶层会话会把一次委派炸成一堆看不懂的条目。
+    //   注意只挡 subagent 这一种来源：普通 fork 出来的会话仍是独立会话，照常列出。
+    val listed = model.listStore.sessions.filter { !it.blank && !it.isSubagentOrigin }
     val erroredIds = model.sessions.filterValues { it.unreadError }.keys
 
     fun ordered(items: List<SessionSummary>): List<SessionSummary> = when (orderBy) {
@@ -131,11 +153,43 @@ fun SessionListScreen(
             for (workspace in model.workspaceStore.workspaces) {
                 val items = grouped[workspace.workspaceId] ?: continue
                 if (items.isEmpty()) continue
-                result.add(SessionGroup(workspace.workspaceId, workspace.title, ordered(items)))
+                result.add(
+                    SessionGroup(
+                        workspace.workspaceId, workspace.title, ordered(items),
+                        workspaceId = workspace.workspaceId,
+                    )
+                )
             }
             if (loose.isNotEmpty()) result.add(SessionGroup("loose", Strings.ungrouped, ordered(loose)))
         }
         result
+    }
+
+    val listState = rememberLazyListState()
+    val density = LocalDensity.current
+    val haptics = LocalHapticFeedback.current
+    val groupDrag = remember(model, listState) { GroupDragState(model, listState) }
+    // 拖动过程里回调要按「当前渲染出来的分组顺序」找落点，所以每次组装完分组都同步一次。
+    SideEffect { groupDrag.movableIds = groups.mapNotNull { it.workspaceId } }
+    // 手指贴到上下边缘时自动滚动：拖的是分组表头，越过一屏之外的分组全靠它。
+    LaunchedEffect(groupDrag.dragging) {
+        if (!groupDrag.dragging) return@LaunchedEffect
+        // 等收起会话行的那次重排落地（一帧组合、一帧布局），再把表头对回手指底下。
+        repeat(2) { withFrameNanos { } }
+        groupDrag.anchorAfterCollapse()
+        val edge = with(density) { 72.dp.toPx() }
+        val step = with(density) { 6.dp.toPx() }
+        while (groupDrag.dragging) {
+            withFrameNanos { }
+            val direction = groupDrag.autoScrollDirection(edge)
+            if (direction != 0 && groupDrag.autoScroll(direction * step)) {
+                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            }
+        }
+    }
+    // 搜索态、扁平视图下没有工作区分组可排，拖到一半切过去就把这次拖动收掉。
+    LaunchedEffect(searching, groupBy) {
+        if (searching || groupBy != "workspace") groupDrag.cancel()
     }
 
     Scaffold(
@@ -185,8 +239,8 @@ fun SessionListScreen(
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
                         }
                     } else {
-                        // 状态点直接进服务页：机器切换、设置、添加新服务都在那一页里。
-                        IconButton(onClick = onOpenServers) {
+                        // 状态点直接进设置页：机器切换、语言与主题、添加新服务都在那一页里。
+                        IconButton(onClick = onOpenSettings) {
                             ConnectionDot(model)
                         }
                     }
@@ -236,7 +290,7 @@ fun SessionListScreen(
                         }
                     }
                     // 加号比「编辑便签」更直白地表示新建。
-                    IconButton(onClick = { showNewSession = true }) {
+                    IconButton(onClick = onNewSession) {
                         Icon(Icons.Default.Add, Strings.newSession)
                     }
                 },
@@ -249,10 +303,14 @@ fun SessionListScreen(
                 onRefresh = { model.pullToRefresh() },
                 modifier = Modifier.fillMaxSize(),
             ) {
-                LazyColumn(Modifier.fillMaxSize()) {
+                LazyColumn(Modifier.fillMaxSize(), state = listState) {
                     if (searching) {
                         val byId = model.listStore.sessionsById
-                        val hits = (model.searchHits ?: emptyList()).mapNotNull { byId[it.sessionId] }
+                        // 搜索结果同样挡掉子智能体（Mac 边栏搜索的 sessionVisible 口径）：
+                        // 主机的命中里会混进子会话，点进去只会是一段没有上下文的委派转写。
+                        val hits = (model.searchHits ?: emptyList())
+                            .mapNotNull { byId[it.sessionId] }
+                            .filterNot { it.isSubagentOrigin }
                         item { SectionHeader("${Strings.searchResults} (${hits.size})", null, false) {} }
                         items(hits, key = { it.sessionId }) { summary ->
                             SessionRow(
@@ -263,15 +321,14 @@ fun SessionListScreen(
                     } else {
                         groups.forEach { group ->
                             item(key = "h-${group.id}") {
-                                SectionHeader(
-                                    group.title, group.sessions.size,
-                                    collapsed.contains(group.id),
-                                ) {
+                                GroupHeader(group, collapsed.contains(group.id), groupDrag) {
                                     collapsed = if (collapsed.contains(group.id)) collapsed - group.id
                                     else collapsed + group.id
                                 }
                             }
-                            if (!collapsed.contains(group.id)) {
+                            // 拖动分组时整张列表先收成一排分组行：手指只在几行之间移动就能换位，
+                            // 不必跨过一整组会话；松手复原。
+                            if (!groupDrag.dragging && !collapsed.contains(group.id)) {
                                 val limit = PAGE_SIZE * (pages[group.id] ?: 1)
                                 val shown = group.sessions.take(limit)
                                 items(shown, key = { it.sessionId }) { summary ->
@@ -299,12 +356,6 @@ fun SessionListScreen(
     }
 
     if (showArchived) ArchivedSheet(model, { showArchived = false }, onOpenSession)
-    if (showNewSession) {
-        NewSessionSheet(model, onDismiss = { showNewSession = false }, onCreated = {
-            showNewSession = false
-            onOpenSession(it)
-        })
-    }
     renaming?.let { target ->
         AlertDialog(
             onDismissRequest = { renaming = null },
@@ -375,11 +426,205 @@ private fun ChoiceItem(
     )
 }
 
+private const val GROUP_HEADER_KEY_PREFIX = "h-"
+
+private fun LazyListLayoutInfo.headerItem(workspaceId: WorkspaceId): LazyListItemInfo? =
+    visibleItemsInfo.firstOrNull { it.key == GROUP_HEADER_KEY_PREFIX + workspaceId }
+
+/**
+ * 分组表头长按拖动换位的过程状态。
+ *
+ * 落点的表达跟 Mac 边栏一模一样：不是「第几位」，而是「插到哪个工作区之前」，空锚点表示
+ * 挪到末尾（Mac 的 `moveWorkspace(_:before:)` / 主机的 `workspace/insertBefore`）。列表
+ * 里只渲染有会话的工作区，下标是渲染序、跟注册表序对不上，锚点用 id 才不会挪错位置。
+ *
+ * Mac 靠鼠标悬停在表头上下边缘画插入线来提示落点；手机没有悬停，所以这里改成边拖边预览：
+ * 拖过半格就先把本地注册表的顺序改掉，用户直接看到结果。预览纯本地，松手时先把顺序退回按下
+ * 那一刻，再走 [PhoneModel.moveWorkspace] 的「乐观移动 + 主机落定 / 失败回滚」——真正的状态
+ * 迁移只保留一份实现，请求也只发一次。
+ */
+@Stable
+private class GroupDragState(
+    private val model: PhoneModel,
+    private val listState: LazyListState,
+) {
+    /** 当前渲染出来、可以换位的工作区 id，渲染序即注册表序。 */
+    var movableIds: List<WorkspaceId> = emptyList()
+
+    var draggingId by mutableStateOf<WorkspaceId?>(null)
+        private set
+
+    /** 被拖表头按下时在视口里的位置，与此后手指累计的位移；两者之和是它此刻该待的地方。 */
+    private var anchorOffset by mutableFloatStateOf(0f)
+    private var dragged by mutableFloatStateOf(0f)
+    private var ghostHeight = 0
+    private val ghostTop: Float get() = anchorOffset + dragged
+    /** 按下那一刻的工作区顺序，用来在松手/取消时把预览退回去。 */
+    private var baseline: List<WorkspaceId> = emptyList()
+
+    val dragging: Boolean get() = draggingId != null
+
+    /**
+     * 被拖表头要画在手指底下需要的位移：期望位置减去布局实际给它的位置。
+     * 预览换位会让布局位置跳到新槽位，这个差值随之缩小，表头因此稳稳跟着手指。
+     */
+    fun translationFor(workspaceId: WorkspaceId): Float {
+        if (workspaceId != draggingId) return 0f
+        val current = listState.layoutInfo.headerItem(workspaceId) ?: return 0f
+        return ghostTop - current.offset
+    }
+
+    /** 开始拖动；只有一个分组时没有换位可言，直接不接这一次长按。 */
+    fun start(workspaceId: WorkspaceId): Boolean {
+        if (movableIds.size < 2) return false
+        val item = listState.layoutInfo.headerItem(workspaceId) ?: return false
+        anchorOffset = item.offset.toFloat()
+        dragged = 0f
+        ghostHeight = item.size
+        baseline = model.workspaceStore.workspaces.map { it.workspaceId }
+        draggingId = workspaceId
+        return true
+    }
+
+    /** 跟进一次手指位移，返回预览顺序是否真的变了（变了才给一次轻震）。 */
+    fun drag(deltaY: Float): Boolean {
+        if (!dragging) return false
+        dragged += deltaY
+        return settlePreview()
+    }
+
+    /**
+     * 列表收成分组行之后，把被拖的表头重新对回手指底下。
+     *
+     * 收起会话行会让内容整体变矮：原先滚到列表深处时，收完可能已经滚不到那么远，列表被迫
+     * 上滚，被拖的表头就跑到手指上方去了——不校正的话，下一次落点计算会立刻把这一组甩到末尾。
+     * 先尽量把列表滚回去，滚不动的部分（已经到顶/内容不足一屏）就认下来，改从表头当前的位置
+     * 继续累计位移。
+     */
+    suspend fun anchorAfterCollapse() {
+        val workspaceId = draggingId ?: return
+        val item = listState.layoutInfo.headerItem(workspaceId) ?: return
+        val drift = item.offset - ghostTop
+        if (drift != 0f) listState.scrollBy(drift)
+        val settled = listState.layoutInfo.headerItem(workspaceId) ?: return
+        anchorOffset = settled.offset.toFloat() - dragged
+    }
+
+    /** 手指贴边时该往哪滚：-1 向上、1 向下、0 不滚。 */
+    fun autoScrollDirection(edge: Float): Int {
+        if (!dragging) return 0
+        val info = listState.layoutInfo
+        return when {
+            ghostTop < info.viewportStartOffset + edge -> -1
+            ghostTop + ghostHeight > info.viewportEndOffset - edge -> 1
+            else -> 0
+        }
+    }
+
+    /** 自动滚一步。期望位置留在视口坐标里不动，于是内容从表头底下滚过去。 */
+    suspend fun autoScroll(step: Float): Boolean {
+        if (!dragging) return false
+        if (listState.scrollBy(step) == 0f) return false
+        return settlePreview()
+    }
+
+    /** 松手：把预览出来的位置换算成锚点，交给主机落定。 */
+    fun commit() {
+        val workspaceId = draggingId ?: return
+        draggingId = null
+        val previewed = model.workspaceStore.workspaces.map { it.workspaceId }
+        val index = previewed.indexOf(workspaceId)
+        val before = if (index < 0) null else previewed.getOrNull(index + 1)
+        val restore = baseline
+        baseline = emptyList()
+        model.workspaceStore.applyOrder(restore)
+        model.moveWorkspace(workspaceId, before)
+    }
+
+    /** 拖动被打断（手势取消、切到搜索/扁平视图）：预览退回按下那一刻。 */
+    fun cancel() {
+        if (!dragging) return
+        val restore = baseline
+        draggingId = null
+        baseline = emptyList()
+        model.workspaceStore.applyOrder(restore)
+    }
+
+    /**
+     * 按当前位置算落点并落成预览。
+     *
+     * 规则与 Mac 的插入线一致：表头中线在期望位置下面的第一个分组，就是「插到它之前」；
+     * 都在上面则是末尾。只有可见表头能参与比较，所以「都在上面」还要再确认一次——最后一个
+     * 可见表头之后如果还有没滚进来的分组，那才是真正的锚点，不是末尾。
+     */
+    private fun settlePreview(): Boolean {
+        val workspaceId = draggingId ?: return false
+        val info = listState.layoutInfo
+        val center = ghostTop + ghostHeight / 2f
+        val visible = movableIds.mapNotNull { other ->
+            if (other == workspaceId) null else info.headerItem(other)?.let { other to it }
+        }
+        if (visible.isEmpty()) return false
+        val before = visible.firstOrNull { center < it.second.offset + it.second.size / 2f }?.first
+            ?: movableIds.drop(movableIds.indexOf(visible.last().first) + 1).firstOrNull { it != workspaceId }
+        return model.workspaceStore.moveWorkspace(workspaceId, before)
+    }
+}
+
+/**
+ * 分组表头。真实工作区的表头可以长按拖动上下换位（与 Mac 边栏同口径：只有工作区参与排序），
+ * 置顶条、「其他」桶和搜索结果的表头照旧只能折叠。
+ */
+@Composable
+private fun GroupHeader(
+    group: SessionGroup,
+    collapsed: Boolean,
+    drag: GroupDragState,
+    onToggle: () -> Unit,
+) {
+    val workspaceId = group.workspaceId
+    if (workspaceId == null) {
+        SectionHeader(group.title, group.sessions.size, collapsed, onToggle = onToggle)
+        return
+    }
+    val haptics = LocalHapticFeedback.current
+    val dragging = drag.draggingId == workspaceId
+    val shape = RoundedCornerShape(8.dp)
+    Box(
+        Modifier
+            // 拖起来的那一行要压在别的分组上面，否则滑过去会被后一行盖住。
+            .zIndex(if (dragging) 1f else 0f)
+            .graphicsLayer { translationY = drag.translationFor(workspaceId) }
+            .shadow(if (dragging) 6.dp else 0.dp, shape)
+            .background(if (dragging) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent, shape)
+            .pointerInput(workspaceId) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = {
+                        if (drag.start(workspaceId)) {
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        }
+                    },
+                    onDrag = { change, amount ->
+                        change.consume()
+                        if (drag.drag(amount.y)) {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        }
+                    },
+                    onDragEnd = { drag.commit() },
+                    onDragCancel = { drag.cancel() },
+                )
+            },
+    ) {
+        SectionHeader(group.title, group.sessions.size, collapsed, dragging = dragging, onToggle = onToggle)
+    }
+}
+
 @Composable
 private fun SectionHeader(
     title: String,
     count: Int?,
     collapsed: Boolean,
+    dragging: Boolean = false,
     onToggle: () -> Unit,
 ) {
     Row(
@@ -396,11 +641,19 @@ private fun SectionHeader(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
+        // 拖起来之后才亮出抓手：静态时每个分组都挂一个会把表头压得很碎。
+        if (dragging) {
+            Icon(
+                Icons.Default.DragIndicator, Strings.reorderGroups,
+                Modifier.size(18.dp), MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         Text(
             title,
-            // 分组标题用更淡的中性灰，和会话行标题（onSurface）拉开层级。
+            // 分组标题用更淡的中性灰，和会话行标题（onSurface）拉开层级；
+            // 拖动中的这一行要跳出来，改用正文色。
             style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.outline,
+            color = if (dragging) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f, fill = false),

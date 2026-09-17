@@ -5,6 +5,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application
@@ -15,9 +17,12 @@
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
         android:theme="@style/Theme.DSHPhone">
+        <!-- launchMode=singleTop：通知卡片与扫码链接都唤起同一个实例（走 onNewIntent），
+             而不是在任务栈上再叠一个 Activity——那会另起一份 PhoneModel，连接和转写从头再来。 -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.DSHPhone">
             <intent-filter>
@@ -31,6 +36,11 @@
                 <data android:scheme="dshm" />
             </intent-filter>
         </activity>
+        <!-- 任务运行期间的常驻前台服务：退到后台后进程不被冻结，实时连接才活得下来。 -->
+        <service
+            android:name=".AgentExecutionService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

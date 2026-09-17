@@ -27,6 +27,14 @@ data class SessionSummary(
     var projections: SessionProjectionsBlock? = null,
 )
 
+/**
+ * 这条会话是不是某个会话派生出来的子智能体（主机的 origin 口径，与 Mac 端一致）。
+ *
+ * 子智能体归父会话的子智能体面板管，不进顶层会话列表、也不进会话搜索结果；
+ * 普通 fork 出来的会话 origin 不是 "subagent"，仍然当独立会话对待。
+ */
+val SessionSummary.isSubagentOrigin: Boolean get() = origin == "subagent"
+
 @Serializable
 data class SessionListValue(val items: List<SessionSummary> = emptyList())
 
@@ -241,6 +249,10 @@ data class WorkspaceView(
     val createdAt: String = "",
     val updatedAt: String = "",
 )
+
+/** `workspace/insertBefore` 的返回：主机落定后的完整工作区顺序。 */
+@Serializable
+data class WorkspaceOrderValue(val workspaceIds: List<WorkspaceId> = emptyList())
 
 // Agent 预设 ——————————————————————————————————————————————————
 

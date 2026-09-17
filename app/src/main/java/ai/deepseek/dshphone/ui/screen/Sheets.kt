@@ -464,161 +464,6 @@ fun ArchivedSheet(model: PhoneModel, onDismiss: () -> Unit, onOpen: (SessionId) 
     }
 }
 
-// —— 新建会话 ————————————————————————————————————————————————
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun NewSessionSheet(model: PhoneModel, onDismiss: () -> Unit, onCreated: (SessionId) -> Unit) {
-    val scope = rememberCoroutineScope()
-    var workspaceId by remember { mutableStateOf<WorkspaceId?>(null) }
-    var sessionId by remember { mutableStateOf<SessionId?>(null) }
-    var preparing by remember { mutableStateOf(true) }
-    var picking by remember { mutableStateOf(false) }
-    var pickingPreset by remember { mutableStateOf(false) }
-
-    suspend fun prepare(id: WorkspaceId?) {
-        preparing = true
-        workspaceId = id
-        sessionId = model.createSession(id)
-        preparing = false
-    }
-
-    LaunchedEffect(Unit) {
-        model.loadAgentPresets()
-        prepare(model.workspaceStore.workspaces.firstOrNull()?.workspaceId)
-    }
-
-    val workspacePath = model.workspaceStore.workspaces.firstOrNull { it.workspaceId == workspaceId }?.path
-    val workspaceTitle = model.workspaceStore.workspaces.firstOrNull { it.workspaceId == workspaceId }?.title
-        ?: Strings.noWorkspace
-    val presetTitle = sessionId?.let { id -> model.sessions[id]?.agentPreset }?.let { presetId ->
-        model.agentPresets.firstOrNull { it.id == presetId }?.let { agentPresetDisplayText(it).name } ?: presetId
-    } ?: Strings.preset
-
-    // 背景跟转写页、列表页同一层底色，别让这张表单自成一色（底部输入区本来就画 background）。
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.background,
-    ) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .heightIn(min = 320.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text(Strings.newSession, Modifier.padding(12.dp), style = MaterialTheme.typography.titleMedium)
-            if (preparing) {
-                Box(Modifier.fillMaxWidth().height(160.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
-                }
-            } else {
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Icon(Icons.AutoMirrored.Filled.Chat, null, Modifier.size(36.dp),
-                        MaterialTheme.colorScheme.outline)
-                    Text(
-                        workspacePath ?: model.lastErrorMessage ?: Strings.noWorkspace,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        AssistChip(
-                            onClick = { picking = true },
-                            label = { Text(workspaceTitle, maxLines = 1) },
-                            leadingIcon = { Icon(Icons.Default.Folder, null, Modifier.size(16.dp)) },
-                        )
-                        AssistChip(
-                            onClick = { pickingPreset = true },
-                            label = { Text(presetTitle, maxLines = 1) },
-                            leadingIcon = { Icon(Icons.Default.Layers, null, Modifier.size(16.dp)) },
-                        )
-                    }
-                }
-            }
-            sessionId?.let { id ->
-                // 新建会话就是为了马上说话：输入框自动拿焦点、直接把键盘顶起来。
-                ComposerBar(model, id, autoFocus = true) { created -> onCreated(created) }
-            }
-        }
-    }
-
-    if (picking) {
-        ModalBottomSheet(onDismissRequest = { picking = false }) {
-            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp)) {
-                item {
-                    ListItem(
-                        modifier = Modifier.clickable {
-                            picking = false
-                            if (workspaceId != null) scope.launch { prepare(null) }
-                        },
-                        headlineContent = { Text(Strings.noWorkspace) },
-                        trailingContent = {
-                            if (workspaceId == null) Icon(Icons.Default.Check, null,
-                                tint = MaterialTheme.colorScheme.primary)
-                        },
-                    )
-                }
-                items(model.workspaceStore.workspaces, key = { it.workspaceId }) { workspace ->
-                    ListItem(
-                        modifier = Modifier.clickable {
-                            picking = false
-                            if (workspace.workspaceId != workspaceId) {
-                                scope.launch { prepare(workspace.workspaceId) }
-                            }
-                        },
-                        headlineContent = { Text(workspace.title) },
-                        supportingContent = { Text(workspace.path, maxLines = 1,
-                            overflow = TextOverflow.Ellipsis) },
-                        trailingContent = {
-                            if (workspace.workspaceId == workspaceId) {
-                                Icon(Icons.Default.Check, null, tint = MaterialTheme.colorScheme.primary)
-                            }
-                        },
-                    )
-                }
-            }
-        }
-    }
-
-    if (pickingPreset && sessionId != null) {
-        val id = sessionId!!
-        ModalBottomSheet(onDismissRequest = { pickingPreset = false }) {
-            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp)) {
-                items(model.agentPresets, key = { it.id }) { preset ->
-                    val text = agentPresetDisplayText(preset)
-                    val selected = model.sessions[id]?.agentPreset == preset.id
-                    ListItem(
-                        modifier = Modifier.clickable {
-                            pickingPreset = false
-                            if (!selected) {
-                                scope.launch {
-                                    if (model.selectAgentPreset(preset.id, id)) {
-                                        model.sessions[id]?.agentPreset = preset.id
-                                    }
-                                }
-                            }
-                        },
-                        headlineContent = { Text(agentPresetMenuLabel(preset)) },
-                        supportingContent = text.description?.takeIf { it.isNotEmpty() }?.let {
-                            { Text(it, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-                        },
-                        trailingContent = {
-                            if (selected) Icon(Icons.Default.Check, null,
-                                tint = MaterialTheme.colorScheme.primary)
-                        },
-                    )
-                }
-            }
-        }
-    }
-}
-
 // —— 会话面板 ————————————————————————————————————————————————
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -798,38 +643,73 @@ fun QuestionSheet(model: PhoneModel, question: QuestionRequested, onDismiss: () 
         PlanReviewSheet(model, question, review, onDismiss)
         return
     }
-    val selected = remember { mutableStateMapOf<String, MutableSet<String>>() }
-    val custom = remember { mutableStateMapOf<String, String>() }
+    // 逐题作答：一次只呈现一道题，翻页条显示进度，最后一题才提交整组答案
+    // （与 Mac 的 QuestionFlow 卡片同一套流程状态）。
+    var flow by remember(question) { mutableStateOf(QuestionFlowState(question.questions)) }
+    var busy by remember(question) { mutableStateOf(false) }
+    val scroll = rememberScrollState()
+    val item = flow.current
+    val draft = flow.currentDraft
+
+    // 换题就把正文滚回顶部，免得下一题开局停在上一题的滚动位置。
+    LaunchedEffect(flow.index) { scroll.scrollTo(0) }
+
+    fun submit(state: QuestionFlowState) {
+        if (busy) return
+        busy = true
+        model.respondQuestion(question, state.answers())
+        onDismiss()
+    }
+
+    fun advance(step: QuestionFlowStep) {
+        flow = step.state
+        if (step.submit) submit(step.state)
+    }
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .heightIn(max = 620.dp)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp)
-                .padding(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            // 不再重复「提问」标题与 host 的「选择」小标题：问题正文本身就是标题，
-            // 弹层已有拖拽把手标识层级。
-            question.questions.forEach { item ->
-                Text(item.question, style = MaterialTheme.typography.bodyLarge)
+        if (item == null || draft == null) return@ModalBottomSheet
+        Column(Modifier.fillMaxWidth().heightIn(max = 620.dp)) {
+            // 不再重复「提问」标题：问题正文本身就是标题，弹层已有拖拽把手标识层级。
+            // 右上角的关闭键放弃整组问题（= 拒答），与底部只跳过当前这题的「跳过」分工不同。
+            Row(
+                Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 4.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Column(Modifier.weight(1f).padding(top = 12.dp)) {
+                    item.header?.takeIf { it.isNotEmpty() }?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Text(item.question, style = MaterialTheme.typography.titleMedium)
+                }
+                IconButton(
+                    onClick = {
+                        if (busy) return@IconButton
+                        busy = true
+                        model.cancelQuestion(question)
+                        onDismiss()
+                    },
+                    enabled = !busy,
+                ) { Icon(Icons.Filled.Close, contentDescription = Strings.questionCancel) }
+            }
+
+            Column(
+                Modifier
+                    .weight(1f, fill = false)
+                    .verticalScroll(scroll)
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 item.detail?.takeIf { it.isNotEmpty() }?.let { MarkdownText(it) }
                 item.options?.forEach { option ->
                     val display = splitRecommended(option.label)
-                    val picked = selected[item.id]?.contains(option.label) == true
+                    val picked = draft.selected.contains(option.label)
                     ListItem(
-                        modifier = Modifier.clickable {
-                            val current = selected.getOrPut(item.id) { mutableSetOf() }
-                            if (item.multiSelect == true) {
-                                if (!current.add(option.label)) current.remove(option.label)
-                            } else {
-                                val had = current.contains(option.label)
-                                current.clear()
-                                if (!had) current.add(option.label)
-                            }
-                            selected[item.id] = current.toMutableSet()
+                        modifier = Modifier.clickable(enabled = !busy) {
+                            advance(flow.chooseSettlingBatch(option.label))
                         },
                         headlineContent = {
                             Row(verticalAlignment = Alignment.CenterVertically,
@@ -856,32 +736,77 @@ fun QuestionSheet(model: PhoneModel, question: QuestionRequested, onDismiss: () 
                     )
                 }
                 OutlinedTextField(
-                    value = custom[item.id] ?: "",
-                    onValueChange = { custom[item.id] = it },
-                    label = { Text(Strings.answerCustom) },
+                    value = draft.custom,
+                    onValueChange = { flow = flow.setCustom(it) },
+                    label = {
+                        // 无选项的题只能自填，这时输入框就是答案本身。
+                        Text(
+                            if (item.options.isNullOrEmpty()) Strings.questionCustomPlaceholder
+                            else Strings.answerCustom
+                        )
+                    },
+                    enabled = !busy,
                     modifier = Modifier.fillMaxWidth(),
                     maxLines = 4,
                 )
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = { model.cancelQuestion(question); onDismiss() },
-                    modifier = Modifier.weight(1f),
-                ) { Text(Strings.questionSkip) }
-                Button(
-                    onClick = {
-                        val answers = question.questions.map { item ->
-                            QuestionAnswer(
-                                id = item.id,
-                                selected = selected[item.id]?.toList() ?: emptyList(),
-                                custom = custom[item.id]?.trim()?.takeIf { it.isNotEmpty() },
+
+            Column(
+                Modifier.padding(horizontal = 16.dp).padding(top = 4.dp, bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                when (flow.validation) {
+                    QuestionFlowValidation.UNANSWERED -> Strings.questionErrorUnanswered
+                    QuestionFlowValidation.INCOMPLETE -> Strings.questionErrorIncomplete
+                    null -> null
+                }?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    if (flow.questions.size > 1) {
+                        IconButton(
+                            onClick = { flow = flow.previous() },
+                            enabled = !flow.isFirst && !busy,
+                        ) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                                contentDescription = Strings.questionPrev,
                             )
                         }
-                        model.respondQuestion(question, answers)
-                        onDismiss()
-                    },
-                    modifier = Modifier.weight(1f),
-                ) { Text(Strings.submit) }
+                        Text(
+                            fmt(Strings.questionProgress, flow.index + 1, flow.questions.size),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        IconButton(
+                            onClick = { flow = flow.next() },
+                            enabled = !flow.isLast && !busy,
+                        ) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = Strings.questionNext,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.weight(1f))
+                    // 跳过 = 这道题拒答，交给下一题；整组跳完才上报。
+                    TextButton(
+                        onClick = { advance(flow.skip()) },
+                        enabled = !busy,
+                    ) { Text(Strings.questionSkip) }
+                    Button(
+                        onClick = { advance(flow.continueFlow()) },
+                        enabled = !busy && draft.answered,
+                    ) { Text(if (flow.isLast) Strings.submit else Strings.questionActionNext) }
+                }
             }
         }
     }

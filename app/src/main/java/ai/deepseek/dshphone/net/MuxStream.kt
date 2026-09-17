@@ -173,6 +173,7 @@ class MuxStream(
             val request = Request.Builder().url(url).build()
             val listener = object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    Log.i(TAG, "mux generation opened (http ${response.code})")
                     val pending = synchronized(lock) {
                         socket = webSocket
                         generationOpen = true
@@ -205,7 +206,13 @@ class MuxStream(
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    Log.w(TAG, "mux generation failed: ${t.message}")
+                    // 带异常类名：以前只打 message，DNS 失败（UnknownHostException 的 message
+                    // 就是主机名）和握手/网络被掐看起来一模一样，排查时无从下手。
+                    Log.w(
+                        TAG,
+                        "mux generation failed: ${t.javaClass.simpleName}: ${t.message}" +
+                            (response?.let { " (http ${it.code})" } ?: ""),
+                    )
                     closed.complete(Unit)
                 }
 

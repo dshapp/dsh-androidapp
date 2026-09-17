@@ -50,6 +50,14 @@ class SessionListStore(private val prefs: SharedPreferences?) {
     private val previousRunning = mutableMapOf<SessionId, Boolean>()
 
     /**
+     * 从基线里补出来的"运行 -> 停止"边沿。
+     *
+     * 每会话只发一次：`reconcileCompleted` 在每个会话上每个 running 周期只会观察到
+     * 一次 true->false，翻转后 `previousRunning` 也被写成 false，不会重复触发。
+     */
+    var onCompleted: ((SessionId) -> Unit)? = null
+
+    /**
      * 每个键的投影版本：`asOfSeq` 是整块快照的截断点，但活跃的键会乱序到达，
      * 一个键前进不能让另一个键的更新看起来变旧。账本从行里的 projections 派生，
      * `sessions` 一变就重建，所以它永远不会比列表本身更"新"。
@@ -70,6 +78,14 @@ class SessionListStore(private val prefs: SharedPreferences?) {
     init {
         pinnedSessionOrder = readOrder(PINNED_KEY)
         flatManualOrder = readOrder(MANUAL_KEY)
+        // 上次进程结束时还在跑的那些会话。进程被系统回收后重开时，内存里的
+        // `previousRunning` 已经没了，只有这份落盘的记录能让"运行 -> 停止"的边沿
+        // 重新成立，完成通知才补得回来。
+        readOrder(RUNNING_KEY).forEach { previousRunning[it] = true }
+    }
+
+    private fun persistRunning() {
+        writeOrder(RUNNING_KEY, previousRunning.filterValues { it }.keys.toList())
     }
 
     private fun readOrder(key: String): List<SessionId> =
@@ -158,6 +174,7 @@ class SessionListStore(private val prefs: SharedPreferences?) {
         if (index < 0) {
             sessions = (sessions + summary).sortedByDescending { it.updatedAt }
             reconcileCompleted(summary)
+            persistRunning()
             return
         }
         val existing = sessions[index]
@@ -170,12 +187,14 @@ class SessionListStore(private val prefs: SharedPreferences?) {
         )
         sessions = sessions.toMutableList().also { it[index] = merged }
         reconcileCompleted(merged)
+        persistRunning()
     }
 
     fun remove(sessionId: SessionId) {
         record(RosterMutation.Removed(sessionId))
         sessions = sessions.filterNot { it.sessionId == sessionId }
         previousRunning.remove(sessionId)
+        persistRunning()
         completedSessionIds = completedSessionIds - sessionId
         awaitingUserSessionIds = awaitingUserSessionIds - sessionId
         awaitingUserKinds = awaitingUserKinds - sessionId
@@ -207,6 +226,7 @@ class SessionListStore(private val prefs: SharedPreferences?) {
         updated[index] = updated[index].copy(running = running, blank = if (running) false else updated[index].blank)
         sessions = updated
         reconcileCompleted(updated[index])
+        persistRunning()
     }
 
     /**
@@ -322,6 +342,7 @@ class SessionListStore(private val prefs: SharedPreferences?) {
         val seen = sessions.map { it.sessionId }.toSet()
         sessions.forEach { reconcileCompleted(it) }
         previousRunning.keys.filterNot { it in seen }.forEach { previousRunning.remove(it) }
+        persistRunning()
         completedSessionIds = completedSessionIds.filter { it in seen }.toSet()
     }
 
@@ -335,6 +356,9 @@ class SessionListStore(private val prefs: SharedPreferences?) {
             if (summary.sessionId != selectedSessionId) {
                 completedSessionIds = completedSessionIds + summary.sessionId
             }
+            // 无论当前选没选中都上报：判定"要不要弹"是通知中心的事（它自己比
+            // appIsActive / visibleSessionId），这里只负责把边沿交出去。
+            onCompleted?.invoke(summary.sessionId)
         } else if (summary.running) {
             completedSessionIds = completedSessionIds - summary.sessionId
         }
@@ -344,6 +368,8 @@ class SessionListStore(private val prefs: SharedPreferences?) {
     companion object {
         private const val PINNED_KEY = "pinned_session_order"
         private const val MANUAL_KEY = "flat_session_order"
+        /** 落盘的"上次还在跑"的会话集合，用于进程重启后的完成补发。 */
+        private const val RUNNING_KEY = "running_session_ids"
     }
 }
 
@@ -377,6 +403,30 @@ class WorkspaceStore {
     fun applyOrder(order: List<WorkspaceId>) {
         val byId = workspaces.associateBy { it.workspaceId }
         workspaces = order.mapNotNull { byId[it] } + workspaces.filterNot { order.contains(it.workspaceId) }
+    }
+
+    /**
+     * 把一个工作区挪到另一个工作区之前，[beforeWorkspaceId] 为空表示挪到末尾
+     * （与 Mac `WorkspaceStore.moveWorkspace` 同构）。
+     *
+     * 锚点用 id 而不是下标：列表里只渲染「有会话的工作区」，下标是渲染序，跟注册表的
+     * 真实顺序对不上；而且这次本地移动随后还要交给主机落定，主机认的也是 id。
+     * 返回是否真的动过，没动就不必发请求。
+     */
+    fun moveWorkspace(workspaceId: WorkspaceId, beforeWorkspaceId: WorkspaceId?): Boolean {
+        if (workspaceId == beforeWorkspaceId) return false
+        val from = workspaces.indexOfFirst { it.workspaceId == workspaceId }
+        if (from < 0) return false
+        if (beforeWorkspaceId != null && workspaces.none { it.workspaceId == beforeWorkspaceId }) return false
+        val next = workspaces.toMutableList()
+        val moved = next.removeAt(from)
+        val insertAt = beforeWorkspaceId
+            ?.let { id -> next.indexOfFirst { it.workspaceId == id }.takeIf { it >= 0 } }
+            ?: next.size
+        next.add(insertAt, moved)
+        if (next.map { it.workspaceId } == workspaces.map { it.workspaceId }) return false
+        workspaces = next
+        return true
     }
 
     fun setArchived(ids: List<SessionId>) { archivedSessionIds = ids }

@@ -42,8 +42,6 @@ data class ServerProfile(
     val addedAt: Long = System.currentTimeMillis(),
     var lastConnectedAt: Long? = null,
 ) {
-    val relayHost: String get() = "$proxyHost:$proxyPort"
-
     /** 设备 ID（公钥），Mac 上的设备列表按它显示与吊销。 */
     val deviceId: String get() = runCatching { encodeKey(Noise.publicKeyOf(decodeKey(devicePrivateKey))) }.getOrDefault("—")
 

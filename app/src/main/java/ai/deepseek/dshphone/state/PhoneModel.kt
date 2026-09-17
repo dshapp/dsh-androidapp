@@ -12,9 +12,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -71,13 +73,33 @@ data class TriggerToken(val kind: Kind, val query: String, val start: Int, val e
 
 /**
  * iOS PhoneModel 的对应物：连接、会话、发送，与各 Store 的编排。
+ *
+ * 进程级的会话模型：`PhoneModel` 挂在 [android.app.Application] 上，而不是 Activity 的
+ * ViewModel 上。
+ *
+ * 退到后台时 Activity 会被销毁，挂在它身上的 ViewModel 跟着走，连接和正在跑的
+ * `viewModelScope` 一起没了——后台也就再也收不到 `\$events` 的完成/失败帧，通知自然不发。
+ * 放到 Application 上之后，只要进程还在（前台服务会保它不死），连接就一直在。
+ *
+ * `get` 只由 [DshApplication] 持有实例，是这条替换唯一的入口。
  */
-class PhoneModel(app: Application) : AndroidViewModel(app) {
+class PhoneModel private constructor(app: Application) {
 
     private val appContext = app.applicationContext
+
+    /**
+     * 替代原来的 `viewModelScope`：作用域跟着进程走，不跟 Activity 走。
+     * `SupervisorJob` 让一个子任务失败不会连坐掉整个连接循环。
+     */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    val appScope: CoroutineScope get() = scope
     private val prefs = appContext.getSharedPreferences("dsh_phone", android.content.Context.MODE_PRIVATE)
 
     val profiles = ServerProfileStore(appContext)
+
+    /** 本机外观偏好（语言、主题）；设置页读写，MainActivity 在组合前先按它定主题。 */
+    val settings = SettingsStore(appContext)
+
     val listStore = SessionListStore(prefs)
     var workspaceStore by mutableStateOf(WorkspaceStore())
         private set
@@ -89,6 +111,16 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
 
     val sessions = mutableStateMapOf<SessionId, SessionStore>()
     var selectedSessionId by mutableStateOf<SessionId?>(null)
+    /**
+     * 此刻真的显示在屏幕上的会话：会话页在场就是它，退回列表就是 null。
+     *
+     * 和 [selectedSessionId] 分开记：那一条是"最后打开过的会话"，会话页退场之后还
+     * 留着，拿它当"用户已经看见了"的判据，会把这条会话之后所有的完成/失败通知一路
+     * 吞掉。Mac 上窗口始终显示着选中的会话，两者是同一件事；手机上由导航栈决定。
+     */
+    var visibleSessionId by mutableStateOf<SessionId?>(null)
+    /** App 是否在前台（对齐 Mac 的 `AgentNotificationConditions.appIsActive`）。 */
+    var appIsActive by mutableStateOf(false)
     var lastErrorMessage by mutableStateOf<String?>(null)
     var agentPresets by mutableStateOf<List<AgentPresetEntry>>(emptyList())
         private set
@@ -108,8 +140,35 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
     private val drafts = mutableMapOf<SessionId, String>()
 
     var notifier: ((AttentionSignal) -> Unit)? = null
+    /** 会话被打开时的旁路观察者：通知中心用它撤掉这条会话的卡片。 */
+    var onSessionOpened: ((SessionId) -> Unit)? = null
+
+    /**
+     * 本机是否有"正在跑的任务"进出。"进"的红沿就来自一次本地提交（后台被回收时
+     * 这条红沿也会跟着丢），"出"由 [listStore.onCompleted] 收到补发的完成边沿时置回。
+     * 常驻的前台服务按它起停，见 [ai.deepseek.dshphone.AgentExecutionService]。
+     */
+    private var activeTaskCount = 0
+    var onRunActivity: ((Boolean) -> Unit)? = null
+        set(value) {
+            field = value
+            value?.invoke(activeTaskCount > 0)
+        }
+
+    /** 重新扫一遍"现在有没有任务在跑"，并把结论交给宿主（前台服务的起停靠它）。 */
+    private fun noteRunActivity() {
+        val active = listStore.sessions.any { it.running } || sessions.values.any { it.running }
+        activeTaskCount = if (active) 1 else 0
+        onRunActivity?.invoke(active)
+    }
 
     val currentStore: SessionStore? get() = selectedSessionId?.let { sessions[it] }
+
+    /**
+     * 这条会话此刻是不是就在用户眼前——通知的"已经看得见，不必再喊一遍"判据
+     * （对齐 Mac `decideAgentNotification` 里的 `appIsActive && visibleSessionId == id`）。
+     */
+    fun isOnScreen(sessionId: SessionId): Boolean = appIsActive && visibleSessionId == sessionId
 
     // —— 连接 ——————————————————————————————————————————————————
 
@@ -126,7 +185,7 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
         // Activity 重建（旋屏、换深色）会重跑 connectCurrent；同一条配置已连上就直接返回，
         // 否则 teardown 会清掉会话窗口，正在看的转写会变成空白。
         if (profile.id == connectedProfileId && api != null && connection is Connection.Connected) return
-        viewModelScope.launch {
+        scope.launch {
             teardown()
             connection = Connection.Connecting
             profiles.setCurrent(profile.id)
@@ -134,7 +193,7 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
             api = client
             val streamCoordinator = StreamCoordinator(
                 api = client,
-                scope = viewModelScope,
+                scope = scope,
                 listStore = listStore,
                 workspaceStore = workspaceStore,
                 sessionLookup = { sessions[it] },
@@ -143,7 +202,7 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
                 remoteEventHandler = { event -> handleRemoteInvalidation(event) },
                 sessionRemovedHandler = { handleSessionRemoved(it) },
                 sessionsArchivedHandler = { ids -> ids.forEach { handleSessionRemoved(it) } },
-                resyncHandler = { viewModelScope.launch { resyncAfterReconnect() } },
+                resyncHandler = { scope.launch { resyncAfterReconnect() } },
                 gapRepairLoader = { address, throughSeq ->
                     when (address) {
                         is SessionAddress.Session ->
@@ -153,6 +212,7 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
                     }
                 },
                 attentionHandler = { signal -> notifier?.invoke(signal) },
+                runActivityHandler = { noteRunActivity() },
             )
             streamCoordinator.onConnectionState = { socketState = it }
             coordinator = streamCoordinator
@@ -176,6 +236,10 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
             listStore.endBaselinePull(value.items, token)
             connection = Connection.Connected
             markConnected?.let { profiles.markConnected(it) }
+            // 基线里的 running 是权威答案：进程被回收后重开、或断线重连时，
+            // `$events` 里那条 status 帧早就错过了，只有这里能重新认出"还有任务在跑"，
+            // 前台服务才起得起来（否则重开后的第一次后台又会被冻死）。
+            noteRunActivity()
         } catch (e: Exception) {
             if (generation != sessionListRefreshGeneration) return
             listStore.discardBaselinePull(token)
@@ -184,13 +248,13 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun refresh() {
-        viewModelScope.launch { refreshInternal() }
+        scope.launch { refreshInternal() }
     }
 
     /// 下拉刷新：重拉会话列表，并把当前会话的窗口对齐到最新。
     fun pullToRefresh() {
         if (refreshing) return
-        viewModelScope.launch {
+        scope.launch {
             refreshing = true
             try {
                 refreshInternal()
@@ -202,7 +266,7 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun handleRemoteInvalidation(event: String) {
-        viewModelScope.launch {
+        scope.launch {
             when (event) {
                 "agent-preset/selected", "settings/document-updated" -> loadAgentPresets()
             }
@@ -249,14 +313,43 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
     // —— 会话 ——————————————————————————————————————————————————
 
     private fun store(id: SessionId): SessionStore =
-        sessions.getOrPut(id) { SessionStore(id).also { coordinator?.hydrateControlState(it) } }
+        sessions.getOrPut(id) {
+            SessionStore(id).also { store ->
+                seedFromSummary(store)
+                coordinator?.hydrateControlState(store)
+            }
+        }
+
+    /**
+     * 用会话列表摘要给刚建出来的 store 打底（对齐 Mac 的 AppModel.upsertSession）。
+     *
+     * 后台帧会懒建 store：重启后第一条实时事件、或一条从没打开过的会话的审批，都会走到这里。
+     * 不铺这一层的话，新 store 的 `running` 默认是 false，队列条上那颗「插队发送」按钮会一直禁用，
+     * 点下去毫无反应——而主机其实正在跑。转写的裁切点同理：不先喂 projections.asOfSeq，
+     * loadHistory 会退化成 throughSeq 0，先闪一下空态再等 snapshot 补。
+     */
+    private fun seedFromSummary(store: SessionStore) {
+        val summary = listStore.sessionsById[store.sessionId] ?: return
+        // blank 只往下压（web handleBlank）：已经跑过的会话不因为这份可能过期的摘要变回空白。
+        if (!summary.blank) store.blank = false
+        store.running = summary.running
+        summary.cwd?.let { store.cwd = it }
+        summary.agentPreset?.let { store.agentPreset = it }
+        summary.projections?.asOfSeq?.let { store.seedHistoryCursor(it) }
+    }
 
     fun open(sessionId: SessionId) {
-        viewModelScope.launch {
+        scope.launch {
             selectedSessionId = sessionId
+            // 用户已经落到这条会话上了，托盘里那张卡片已经完成使命
+            //（对齐 iOS `open()` 里的 `notifications.sessionOpened`）。
+            onSessionOpened?.invoke(sessionId)
             listStore.selectedSessionId = sessionId
             listStore.clearCompleted(sessionId)
             val store = store(sessionId)
+            // 先喂首页裁切点再 follow：store 是既有的那些不会走 seedFromSummary，
+            // 少了这一步 historyCursor 会退化成 0（与 Mac 手机端 open 同一处动作）。
+            listStore.sessionsById[sessionId]?.projections?.asOfSeq?.let { store.seedHistoryCursor(it) }
             // 基线由 session/follow 的 snapshot 帧给出：它自带 records / hasMore / projections。
             // 这里的分页只兜底"已经有实时事件、却还没有基线"的 store（通知唤起的那种）；
             // 完全空白的新 store 没有游标，loadHistory 会直接跳过，转写保持加载态等 snapshot。
@@ -282,6 +375,8 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
             )
             store.loadHistory(value, replacing = !loadingOlder)
             store.historyError = null
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             store.historyError = HistoryError("internal", describe(e))
         } finally {
@@ -294,12 +389,12 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
         val store = sessions[sessionId] ?: return
         store.historyError = null
         coordinator?.refollow(sessionId)
-        viewModelScope.launch { if (!store.historyLoaded) loadHistory(store) }
+        scope.launch { if (!store.historyLoaded) loadHistory(store) }
     }
 
     fun loadEarlier(store: SessionStore) {
         if (!store.hasMore || store.loadingHistory) return
-        viewModelScope.launch { loadHistory(store) }
+        scope.launch { loadHistory(store) }
     }
 
     /** 为轮次跳转分页到指定序号。 */
@@ -323,6 +418,79 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * 新建会话页默认选中的工作区。
+     *
+     * Mac 端并不额外存一份「工作区偏好」：它把当前会话 id 存进 UserDefaults 的
+     * `dsh.sessions.current`，新建会话时先由这条会话反查出所属工作区
+     * （`currentWorkspaceId`），取不到才退回 `recentWorkspaceId()`。手机端列表页没有
+     * 常驻的"当前会话"，所以这里把等价的事实直接落成一条偏好：上一次真正开出新会话
+     * （发出了第一条消息）时用的那个工作区。
+     *
+     * 不能只看 [recentWorkspaceId]：在新建会话页里切换工作区就会在那边落一个空白会话，
+     * 于是"只是翻了一下工作区"也会把它顶成最近更新的那个——用户看到的默认值就变成了
+     * 最后一次切换的痕迹，而不是最后一次真的在哪儿开过会话。
+     *
+     * 存下来的 id 主机上已经没有了（换了服务器、工作区被删）就当没存过，退回
+     * [recentWorkspaceId]（对齐 Mac 对失效 `dsh.sessions.current` 的处理）。
+     */
+    fun defaultNewSessionWorkspaceId(): WorkspaceId? {
+        val remembered = prefs.getString(LAST_WORKSPACE_KEY, null)
+        if (remembered != null && workspaceStore.workspaces.any { it.workspaceId == remembered }) {
+            return remembered
+        }
+        return recentWorkspaceId()
+    }
+
+    /** 新建会话页真的开出了一条会话：记住这次用的工作区，作为下次的默认值。 */
+    fun rememberNewSessionWorkspace(workspaceId: WorkspaceId?) {
+        if (workspaceId == null) prefs.edit().remove(LAST_WORKSPACE_KEY).apply()
+        else prefs.edit().putString(LAST_WORKSPACE_KEY, workspaceId).apply()
+    }
+
+    /**
+     * 最近更新过的工作区（Mac `recentWorkspaceId` / web `recentWorkspace` 口径）。
+     *
+     * 取「最近更新过的工作区」：工作区下所有会话 updatedAt 的最大值，没有任何会话时退回
+     * 工作区自己的 createdAt；并列时按主机工作区顺序取靠前的那个（严格大于才换人）。
+     * 不能直接用 workspaces.first()——主机的工作区顺序是「最后一次切换工作区」留下的，
+     * 那是切换痕迹，不是「最后一次在哪儿新建过会话」。
+     */
+    fun recentWorkspaceId(): WorkspaceId? {
+        val sessionsById = listStore.sessionsById
+        var selected: WorkspaceView? = null
+        var selectedTime = Double.NEGATIVE_INFINITY
+        for (workspace in workspaceStore.workspaces) {
+            var latest = Double.NEGATIVE_INFINITY
+            for (sessionId in workspace.sessionIds) {
+                val session = sessionsById[sessionId] ?: continue
+                if (session.updatedAt > latest) latest = session.updatedAt
+            }
+            if (latest == Double.NEGATIVE_INFINITY) latest = parseWorkspaceCreatedAt(workspace.createdAt)
+            if (selected == null || latest > selectedTime) {
+                selected = workspace
+                selectedTime = latest
+            }
+        }
+        return selected?.workspaceId
+    }
+
+    /**
+     * 工作区 createdAt 是带小数秒的 ISO-8601 字符串，会话 updatedAt 是毫秒时间戳，
+     * 这里统一换算成毫秒好比大小；解析不出来就给 -inf，免得一个坏日期反而赢过真实会话时间
+     * （对齐 web `Date.parse` → NaN 比较失败、Mac `parseWorkspaceCreatedAt`）。
+     */
+    private fun parseWorkspaceCreatedAt(raw: String): Double =
+        try {
+            java.time.Instant.parse(raw).toEpochMilli().toDouble()
+        } catch (_: Exception) {
+            try {
+                java.time.OffsetDateTime.parse(raw).toInstant().toEpochMilli().toDouble()
+            } catch (_: Exception) {
+                Double.NEGATIVE_INFINITY
+            }
+        }
+
     /** 新建会话：优先复用该工作区下已有的空白会话。 */
     suspend fun createSession(workspaceId: WorkspaceId?): SessionId? {
         val client = api ?: return null
@@ -343,6 +511,8 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
             refreshInternal()
             open(value.sessionId)
             value.sessionId
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             lastErrorMessage = describe(e)
             null
@@ -369,6 +539,9 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
                         content.add(PromptContentPart.File(client.uploadFile(sessionId, payload.file, attachment.name)))
                 }
             }
+        } catch (e: CancellationException) {
+            store.retirePendingSubmission(requestId)
+            throw e
         } catch (e: Exception) {
             store.retirePendingSubmission(requestId)
             lastErrorMessage = describe(e)
@@ -385,7 +558,11 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
             store.blank = false
             store.running = true
             listStore.markEngaged(sessionId)
+            noteRunActivity()
             true
+        } catch (e: CancellationException) {
+            store.retirePendingSubmission(requestId)
+            throw e
         } catch (e: Exception) {
             store.retirePendingSubmission(requestId)
             store.historyError = HistoryError("internal", describe(e))
@@ -406,6 +583,9 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
                 TimeZone.getDefault().id, requestId,
             )
             true
+        } catch (e: CancellationException) {
+            store.retirePendingSubmission(requestId)
+            throw e
         } catch (e: Exception) {
             store.retirePendingSubmission(requestId)
             lastErrorMessage = describe(e)
@@ -413,20 +593,64 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // 发送一旦交出去就得跑完：挂在 scope 上，输入区跟着导航离开 composition 也不会被取消。
+    fun submit(text: String, sessionId: SessionId, attachments: List<PhoneAttachment>) {
+        scope.launch { send(text, sessionId, attachments) }
+    }
+
+    fun submitSteer(text: String, sessionId: SessionId) {
+        scope.launch { steer(text, sessionId) }
+    }
+
+    fun submitToSubagent(text: String, sessionId: SessionId) {
+        scope.launch { sendToSubagent(text, sessionId) }
+    }
+
     fun stop(sessionId: SessionId) {
-        viewModelScope.launch { runCatching { api?.sessionCancel(sessionId) } }
+        scope.launch { runCatching { api?.sessionCancel(sessionId) } }
     }
 
-    fun removeQueued(itemId: MessageId, sessionId: SessionId) {
-        viewModelScope.launch { runCatching { api?.sessionUpdateQueue(sessionId, itemId, QueueAction.Remove) } }
+    /**
+     * 队列动作：主机一旦收下就在控制流里推新的队列帧，界面随即收敛，所以这里不做乐观更新。
+     *
+     * 失败只在"用户还能做点什么"时才弹提示：插队发送撞上 steer-unavailable /
+     * queue-item-not-found（行已经被主机取走、或已经被自己前一次点击插过队）属于竞态收敛，
+     * 静默吃掉即可——与 Mac 的 QueueInteractionState.completeMutation 逐条对齐。
+     */
+    private suspend fun queueMutation(
+        sessionId: SessionId,
+        itemId: MessageId,
+        action: QueueAction,
+        failure: String,
+    ) {
+        val client = api ?: return
+        try {
+            // 动作一旦发出就要跑完：点了插队发送后这一行会立刻离开队列条、
+            // 承载它的 composition 也随之消失。若跟着 UI 作用域一起取消，
+            // 主机可能已经把消息挪进 next-step 而我们却读不到回执。
+            withContext(NonCancellable) { client.sessionUpdateQueue(sessionId, itemId, action) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // 主机抛的是带命名空间的 "session/steer-unavailable"，而 Mac 端拿到的是
+            // 去掉命名空间的 "steer-unavailable"；两种写法都认。
+            val code = (e as? ApiException)?.code?.substringAfterLast('/') ?: ""
+            val converged = action is QueueAction.Steer &&
+                (code == "steer-unavailable" || code == "queue-item-not-found")
+            if (!converged) lastErrorMessage = failure.ifEmpty { describe(e) }
+        }
     }
 
-    fun editQueued(itemId: MessageId, text: String, sessionId: SessionId) {
-        viewModelScope.launch { runCatching { api?.sessionUpdateQueue(sessionId, itemId, QueueAction.Edit(text)) } }
+    suspend fun removeQueued(itemId: MessageId, sessionId: SessionId) {
+        queueMutation(sessionId, itemId, QueueAction.Remove, Strings.queueRemoveFailed)
     }
 
-    fun steerQueued(itemId: MessageId, sessionId: SessionId) {
-        viewModelScope.launch { runCatching { api?.sessionUpdateQueue(sessionId, itemId, QueueAction.Steer) } }
+    suspend fun editQueued(itemId: MessageId, text: String, sessionId: SessionId) {
+        queueMutation(sessionId, itemId, QueueAction.Edit(text), Strings.queueEditFailed)
+    }
+
+    suspend fun steerQueued(itemId: MessageId, sessionId: SessionId) {
+        queueMutation(sessionId, itemId, QueueAction.Steer, Strings.queueSteerFailed)
     }
 
     // —— 草稿 ——————————————————————————————————————————————————
@@ -469,7 +693,7 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
     // —— 会话管理 ——————————————————————————————————————————————
 
     fun search(query: String) {
-        viewModelScope.launch {
+        scope.launch {
             val trimmed = query.trim()
             val client = api
             if (client == null || trimmed.isEmpty()) {
@@ -481,7 +705,7 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun rename(sessionId: SessionId, title: String) {
-        viewModelScope.launch {
+        scope.launch {
             try {
                 api?.sessionRename(sessionId, title)
                 refreshInternal()
@@ -504,7 +728,7 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun archive(sessionId: SessionId) {
-        viewModelScope.launch {
+        scope.launch {
             try {
                 api?.workspaceArchiveSession(sessionId)
                 sessions.remove(sessionId)
@@ -515,8 +739,37 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * 分组拖动换位后的排序（与 Mac `AppModel.moveWorkspace` 同构）：先本地乐观移动，
+     * 手指一松就到位；再交给主机 `workspace/insertBefore` 落定，[beforeWorkspaceId]
+     * 为空表示挪到末尾。
+     *
+     * 落定和回滚前都先比一次「本地顺序是否还等于我们乐观改出来的那个」：请求在飞的这段
+     * 时间里，工作区跟随流可能推来了新的顺序，用户也可能又拖了一次，这时候再拿旧结果去
+     * 覆盖就是把新状态冲掉。比较只看这次移动前就已存在的 id，期间新建的工作区不参与。
+     */
+    fun moveWorkspace(workspaceId: WorkspaceId, beforeWorkspaceId: WorkspaceId?) {
+        val previousOrder = workspaceStore.workspaces.map { it.workspaceId }
+        if (!workspaceStore.moveWorkspace(workspaceId, beforeWorkspaceId)) return
+        val optimisticOrder = workspaceStore.workspaces.map { it.workspaceId }
+        val previousIds = previousOrder.toSet()
+        fun untouched(): Boolean =
+            workspaceStore.workspaces.map { it.workspaceId }.filter { it in previousIds } == optimisticOrder
+        scope.launch {
+            try {
+                val settled = api?.workspaceInsertBefore(workspaceId, beforeWorkspaceId) ?: return@launch
+                if (untouched()) workspaceStore.applyOrder(settled.workspaceIds)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (untouched()) workspaceStore.applyOrder(previousOrder)
+                lastErrorMessage = describe(e)
+            }
+        }
+    }
+
     fun openOnHost(path: String) {
-        viewModelScope.launch {
+        scope.launch {
             try { api?.hostOpenPath(path) } catch (e: Exception) { lastErrorMessage = describe(e) }
         }
     }
@@ -553,6 +806,8 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
             client.subagentPrompt(address, trimmed, TimeZone.getDefault().id)
             store.running = true
             true
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             lastErrorMessage = describe(e)
             false
@@ -560,7 +815,7 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun interruptSubagent(sessionId: SessionId) {
-        viewModelScope.launch {
+        scope.launch {
             sessions[sessionId]?.subagentAddress?.let { runCatching { api?.subagentInterrupt(it) } }
         }
     }
@@ -597,14 +852,14 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
     // —— 目标 ——————————————————————————————————————————————————
 
     fun createGoal(objective: String, maxGoalRounds: Int?, sessionId: SessionId) {
-        viewModelScope.launch {
+        scope.launch {
             try { api?.goalCreate(sessionId, objective, maxGoalRounds) }
             catch (e: Exception) { lastErrorMessage = describe(e) }
         }
     }
 
     fun editGoal(objective: String, sessionId: SessionId) {
-        viewModelScope.launch {
+        scope.launch {
             val ref = sessions[sessionId]?.goalRef ?: return@launch
             try { api?.goalEdit(sessionId, ref, objective) }
             catch (e: Exception) { lastErrorMessage = describe(e) }
@@ -612,7 +867,7 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun toggleGoalPause(sessionId: SessionId) {
-        viewModelScope.launch {
+        scope.launch {
             val store = sessions[sessionId] ?: return@launch
             val goal = store.goal ?: return@launch
             val ref = store.goalRef ?: return@launch
@@ -623,7 +878,7 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun clearGoal(sessionId: SessionId) {
-        viewModelScope.launch {
+        scope.launch {
             val ref = sessions[sessionId]?.goalRef ?: return@launch
             try { api?.goalClear(sessionId, ref) } catch (e: Exception) { lastErrorMessage = describe(e) }
         }
@@ -646,7 +901,7 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun selectModel(selection: ModelSelection, sessionId: SessionId) {
-        viewModelScope.launch {
+        scope.launch {
             val client = api ?: return@launch
             val store = sessions[sessionId] ?: return@launch
             val directory = store.modelDirectory.beginSelecting()
@@ -666,7 +921,7 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
 
     fun selectPermission(presetId: String, sessionId: SessionId) {
         if (presetId == "custom") return
-        viewModelScope.launch {
+        scope.launch {
             try { api?.sessionSelectPermission(sessionId, presetId) }
             catch (e: Exception) { lastErrorMessage = describe(e) }
         }
@@ -689,7 +944,7 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
     fun compactContext(sessionId: SessionId) = runCommand("/compact", sessionId)
 
     private fun runCommand(line: String, sessionId: SessionId) {
-        viewModelScope.launch {
+        scope.launch {
             try { api?.commandsExecute(sessionId, line) }
             catch (e: Exception) { lastErrorMessage = describe(e) }
         }
@@ -698,7 +953,7 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
     // —— 审批与提问 ————————————————————————————————————————————
 
     fun respondApproval(approval: ApprovalRequested, outcome: ApprovalOutcome) {
-        viewModelScope.launch {
+        scope.launch {
             settle(approval.eventId, RemoteEventOutcome.Result(
                 kotlinx.serialization.json.JsonPrimitive(outcome.wire)
             ))
@@ -708,7 +963,7 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun respondQuestion(question: QuestionRequested, answers: List<QuestionAnswer>) {
-        viewModelScope.launch {
+        scope.launch {
             val payload = kotlinx.serialization.json.buildJsonObject {
                 put("answers", kotlinx.serialization.json.buildJsonArray {
                     for (answer in answers) {
@@ -729,7 +984,7 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun cancelQuestion(question: QuestionRequested) {
-        viewModelScope.launch {
+        scope.launch {
             settle(question.eventId, RemoteEventOutcome.Next)
             sessions[question.sessionId]?.setQuestion(null)
             listStore.clearAwaitingUser(question.sessionId)
@@ -779,7 +1034,22 @@ class PhoneModel(app: Application) : AndroidViewModel(app) {
     }
 
     companion object {
+        /** 上一次真正开出新会话时用的工作区（新建会话页的默认选中项）。 */
+        private const val LAST_WORKSPACE_KEY = "phone.workspace.lastNewSession"
+
         fun describe(error: Throwable): String =
             (error as? ApiException)?.detail ?: error.message ?: error.toString()
+
+        /**
+         * 进程内唯一实例。由 [DshApplication.onCreate] 在首帧之前建好，
+         * 之后 Activity 重建拿到的都是它。
+         */
+        @Volatile
+        private var instance: PhoneModel? = null
+
+        fun get(app: Application): PhoneModel =
+            instance ?: synchronized(this) {
+                instance ?: PhoneModel(app).also { instance = it }
+            }
     }
 }

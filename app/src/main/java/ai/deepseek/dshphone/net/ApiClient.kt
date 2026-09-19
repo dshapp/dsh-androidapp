@@ -105,6 +105,37 @@ class ApiClient(target: MobileTarget) {
             envelope.result.value ?: JsonNull
         }
 
+    /**
+     * GET 一个插件路由，返回 JSON；404 表示「主机已经不再提供这条记录」。
+     *
+     * 与 [call] 的 POST RPC 不同：这类路由不是 Remote 方法，主机直接以裸 JSON 应答，
+     * 记录随会话销毁而消失时用 404 表达「没有可显示的东西」——是正常结果而非错误，
+     * 所以这里返回 null 让调用方不画卡片，其余非 2xx 才抛。
+     */
+    suspend fun getJson(path: String, query: List<Pair<String, String>> = emptyList()): JsonElement? =
+        withContext(Dispatchers.IO) {
+            if (invalidated) throw internalError("client has been invalidated")
+            val url = ("${baseUrl.trimEnd('/')}/" + path.trimStart('/')).toHttpUrl()
+                .newBuilder()
+                .apply { query.forEach { (name, value) -> addQueryParameter(name, value) } }
+                .build()
+            val request = Request.Builder().url(url).get().build()
+            try {
+                http.newCall(request).execute().use { response ->
+                    val payload = response.body?.string().orEmpty()
+                    if (response.code == 404) return@use null
+                    if (!response.isSuccessful) {
+                        throw ApiException(RpcError("internal", payload.ifBlank { "HTTP ${response.code}" }))
+                    }
+                    DshJson.parseToJsonElement(payload)
+                }
+            } catch (e: ApiException) {
+                throw e
+            } catch (e: Exception) {
+                throw internalError(e.message ?: e.toString())
+            }
+        }
+
     /** 上传一个文件，换回 prompt 可用的收据。 */
     suspend fun uploadFile(sessionId: SessionId, file: File, name: String): String =
         withContext(Dispatchers.IO) {

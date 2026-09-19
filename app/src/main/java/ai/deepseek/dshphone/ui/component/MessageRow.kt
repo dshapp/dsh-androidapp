@@ -12,6 +12,8 @@ import ai.deepseek.dshphone.ui.theme.Dimens
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -47,6 +49,8 @@ fun MessageRow(
     model: PhoneModel,
     store: SessionStore?,
     onOpenFile: (String) -> Unit,
+    /** Markdown 链接指向的工作区文件；用系统查看器打开。 */
+    onOpenLink: (ai.deepseek.dshphone.model.FileLinkTarget) -> Unit,
     onFork: (Int) -> Unit,
     /** 会话内查找的查询词；空串表示不在查找态，不画高亮。 */
     findQuery: String = "",
@@ -57,8 +61,9 @@ fun MessageRow(
         is ChatNode.User -> UserBubble(node.content, sessionId, model, findQuery, findActive)
         is ChatNode.Steering -> UserBubble(node.content, sessionId, model, findQuery, findActive)
         is ChatNode.Context -> ContextRow(node)
-        is ChatNode.Assistant -> AssistantRow(node.step, sessionId, model, store, onOpenFile, findQuery, findActive)
-        is ChatNode.Tool -> ToolCard(node.data, cwd, findQuery, findActive)
+        is ChatNode.Assistant ->
+            AssistantRow(node.step, sessionId, model, store, onOpenFile, onOpenLink, findQuery, findActive)
+        is ChatNode.Tool -> ToolCard(node.data, cwd, findQuery, findActive, sessionId, model)
         is ChatNode.TurnError -> NoticeRow(
             Icons.Default.Warning, node.data.message, MaterialTheme.colorScheme.error, detailed = true,
         )
@@ -67,7 +72,7 @@ fun MessageRow(
         is ChatNode.TurnMaxTokens -> NoticeRow(Icons.Default.ErrorOutline, Strings.maxTokens, Color(0xFFE08600))
         is ChatNode.Command -> NoticeRow(Icons.AutoMirrored.Filled.KeyboardArrowRight, "/" + (node.data.name ?: ""))
         // 收尾消息还没落定的轮次没有页脚（对齐 Mac 的 `TurnTailRow`）。
-        is ChatNode.TurnTail -> if (node.rendersRow) TurnTailRow(node.data, onFork)
+        is ChatNode.TurnTail -> if (node.rendersRow) TurnTailRow(node.data, onFork, model, store)
         is ChatNode.TurnProcess -> TurnProcessRow(node.spec, store)
         is ChatNode.SystemPrompt -> SystemPromptRow(node.data)
         is ChatNode.Workflow -> WorkflowRunCard(node.data)
@@ -84,8 +89,7 @@ private fun UserBubble(
     findActive: Boolean = false,
 ) {
     val text = plainText(content)
-    val images = content.filterIsInstance<ContentBlock.Image>()
-        .mapNotNull { it.attachment?.let { att -> decodeImageRef(att) } }
+    val images = lenientImageRefs(content)
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         // 气泡最多占列宽的 82%，但短消息只占自己需要的宽度——
         // 旧写法是固定占比，一句「好」也会被拉成横贯半屏的长条。
@@ -97,7 +101,7 @@ private fun UserBubble(
         horizontalAlignment = Alignment.End,
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        images.forEach { ref -> AttachmentImage(sessionId, ref, model) }
+        ImageGallery(images, sessionId, model, alignEnd = true)
         if (text.isNotEmpty()) {
             // 点气泡弹出「复制」小泡泡，一键复制整句；长按仍走系统文本选择。
             var copyMenu by remember(text) { mutableStateOf(false) }
@@ -140,23 +144,35 @@ private fun UserBubble(
     }
 }
 
-private fun decodeImageRef(attachment: kotlinx.serialization.json.JsonElement): ImageAttachmentRef? =
-    runCatching {
-        ai.deepseek.dshphone.net.DshJson.decodeFromJsonElement(ImageAttachmentRef.serializer(), attachment)
-    }.getOrNull()
-
+/**
+ * 一张持久化图片：拿 attachmentId 走 session/attachment 取字节再解码。
+ *
+ * 尺寸按附件自己声明的 width/height 收在 [IMAGE_MAX_WIDTH]/[IMAGE_MAX_HEIGHT] 以内，
+ * 声明缺失（0）时退回固定上限；取不到字节时给一个明确的失败占位，而不是一直转圈。
+ */
 @Composable
-fun AttachmentImage(sessionId: SessionId, ref: ImageAttachmentRef, model: PhoneModel) {
+fun AttachmentImage(
+    sessionId: SessionId,
+    ref: ImageAttachmentRef,
+    model: PhoneModel,
+    /** 一组多图时缩成小图（Web 的 compact）。 */
+    compact: Boolean = false,
+) {
     var bitmap by remember(ref.attachmentId) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var loaded by remember(ref.attachmentId) { mutableStateOf(false) }
     var full by remember { mutableStateOf(false) }
-    LaunchedEffect(ref.attachmentId) { bitmap = model.attachmentImage(sessionId, ref) }
+    LaunchedEffect(ref.attachmentId) {
+        bitmap = model.attachmentImage(sessionId, ref)
+        loaded = true
+    }
     val image = bitmap
     if (image != null) {
         Image(
             image.asImageBitmap(),
             contentDescription = ref.name,
             modifier = Modifier
-                .heightIn(max = 220.dp)
+                .widthIn(max = if (compact) IMAGE_COMPACT_MAX_WIDTH else IMAGE_MAX_WIDTH)
+                .heightIn(max = if (compact) IMAGE_COMPACT_MAX_HEIGHT else IMAGE_MAX_HEIGHT)
                 .clip(RoundedCornerShape(10.dp))
                 .clickable { full = true },
             contentScale = ContentScale.Fit,
@@ -173,7 +189,56 @@ fun AttachmentImage(sessionId: SessionId, ref: ImageAttachmentRef, model: PhoneM
                 .height(120.dp)
                 .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp)),
             contentAlignment = Alignment.Center,
-        ) { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) }
+        ) {
+            if (loaded) {
+                // 取不到就明说：ref 在日志里存在、字节读不到（未被会话引用/已被清理）。
+                Text(
+                    Strings.imageUnavailable,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+            }
+        }
+    }
+}
+
+/** 转写里单张图片的显示上限（与 Mac 手机端同样的收口）。 */
+private val IMAGE_MAX_WIDTH = 280.dp
+private val IMAGE_MAX_HEIGHT = 220.dp
+
+/** 一组多图时的缩略上限（Web 的 compact 相册）。 */
+private val IMAGE_COMPACT_MAX_WIDTH = 120.dp
+private val IMAGE_COMPACT_MAX_HEIGHT = 120.dp
+
+/**
+ * 连续图片排成一组，与 Web 的 `renderMessageImages` 同口径：
+ * 一张铺开，多张缩成一行；用户气泡靠右（alignEnd），助手正文靠左。
+ */
+@Composable
+fun ImageGallery(
+    refs: List<ImageAttachmentRef>,
+    sessionId: SessionId,
+    model: PhoneModel,
+    alignEnd: Boolean,
+) {
+    if (refs.isEmpty()) return
+    val compact = refs.size > 1
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = if (alignEnd) Arrangement.End else Arrangement.Start,
+    ) {
+        if (compact) {
+            Row(
+                Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                refs.forEach { ref -> AttachmentImage(sessionId, ref, model, compact = true) }
+            }
+        } else {
+            AttachmentImage(sessionId, refs.first(), model)
+        }
     }
 }
 
@@ -184,10 +249,10 @@ private fun AssistantRow(
     model: PhoneModel,
     store: SessionStore?,
     onOpenFile: (String) -> Unit,
+    onOpenLink: (ai.deepseek.dshphone.model.FileLinkTarget) -> Unit,
     findQuery: String = "",
     findActive: Boolean = false,
 ) {
-    val clipboard = LocalClipboardManager.current
     @Suppress("UNUSED_EXPRESSION")
     store?.deliverablesRevision
     val mentions = store?.closingMentions(step.turn, step.step, step.status == AssistantStatus.RUNNING)
@@ -196,7 +261,24 @@ private fun AssistantRow(
         Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(Dimens.rowSpacing),
     ) {
-        step.blocks.filterNotNull().forEach { block ->
+        val visible = step.blocks.filterNotNull()
+        var index = 0
+        while (index < visible.size) {
+            val block = visible[index]
+            // 连续的图片块合成一组相册；中间隔了文本就各成一组（Web 的相邻分组）。
+            if (block is AssistantBlock.Image) {
+                val refs = mutableListOf<ImageAttachmentRef>()
+                var cursor = index
+                while (cursor < visible.size) {
+                    val candidate = visible[cursor] as? AssistantBlock.Image ?: break
+                    candidate.attachment?.let { att -> decodeImageRef(att)?.let { refs.add(it) } }
+                    cursor++
+                }
+                ImageGallery(refs, sessionId, model, alignEnd = false)
+                index = cursor
+                continue
+            }
+            index++
             when (block) {
                 // 正文长按即进入系统文本选择（Android 原生复制路径）。
                 is AssistantBlock.Text -> androidx.compose.foundation.text.selection.SelectionContainer(
@@ -208,14 +290,13 @@ private fun AssistantRow(
                         block.text,
                         fileMentions = mentions,
                         onOpenFile = onOpenFile,
+                        onOpenLink = onOpenLink,
                         findQuery = findQuery,
                         findActive = findActive,
                     )
                 }
                 is AssistantBlock.Reasoning -> ThinkCard(block.text, findQuery, findActive)
-                is AssistantBlock.Image -> block.attachment?.let { att ->
-                    decodeImageRef(att)?.let { AttachmentImage(sessionId, it, model) }
-                }
+                // 图片块在上面成组处理了，这里不再重复。
                 else -> Unit
             }
         }
@@ -316,17 +397,25 @@ private fun TurnProcessRow(spec: TurnProcessSpec, store: SessionStore?) {
 /** 一轮结束的页脚：复制回复、分支、用量与用时、结束时刻。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TurnTailRow(data: TurnTailData, onFork: (Int) -> Unit) {
+private fun TurnTailRow(
+    data: TurnTailData,
+    onFork: (Int) -> Unit,
+    model: PhoneModel,
+    store: SessionStore?,
+) {
     val clipboard = LocalClipboardManager.current
     var copied by remember { mutableStateOf(false) }
     var usageOpen by remember { mutableStateOf(false) }
     var timeOpen by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    Row(
-        Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
+    Column(Modifier.fillMaxWidth()) {
+        // 本轮的改动文件与产出文件一起挂在回合尾部（web 把三者合并进 turnTail 链）。
+        store?.let { ChangedFilesCard(model, it, data.turn) }
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
         data.closingText?.takeIf { it.isNotEmpty() }?.let { text ->
             IconButton(onClick = {
                 clipboard.setText(AnnotatedString(text))
@@ -359,7 +448,9 @@ private fun TurnTailRow(data: TurnTailData, onFork: (Int) -> Unit) {
             color = MaterialTheme.colorScheme.outline,
             modifier = Modifier.padding(start = 4.dp),
         )
+        }
     }
+    // 两个统计弹窗挂在版面之外（弹窗不占布局），所以留在 Column 之后。
     if (usageOpen) {
         val usage = data.usage
         StatDialog(Strings.turnUsageTitle, usage?.let { tokenCount(turnTotalTokens(it)) }, { usageOpen = false }) {

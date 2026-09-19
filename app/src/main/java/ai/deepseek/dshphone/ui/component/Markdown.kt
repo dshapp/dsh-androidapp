@@ -60,6 +60,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import ai.deepseek.dshphone.i18n.Strings
+import ai.deepseek.dshphone.model.FileLink
 import ai.deepseek.dshphone.model.TurnDeliverables
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -132,6 +133,8 @@ private class MarkdownScope(
     val tasks: Map<ListItem, Boolean>,
     val mentions: List<String>,
     val onOpenFile: (String) -> Unit,
+    /** 链接指向的工作区文件（[ai.deepseek.dshphone.model.FileLink] 解析结果）；为 null 时这类链接交回系统处理。 */
+    val onOpenLink: ((ai.deepseek.dshphone.model.FileLinkTarget) -> Unit)?,
     /** 会话内查找的查询词；空串表示不在查找态。 */
     val findQuery: String,
     /** 命中字的行内样式；不在查找态时为 null。 */
@@ -150,6 +153,8 @@ fun MarkdownText(
     modifier: Modifier = Modifier,
     fileMentions: List<String> = emptyList(),
     onOpenFile: (String) -> Unit = {},
+    /** 链接指向的工作区文件；不传时这类链接仍按普通地址交给系统。 */
+    onOpenLink: ((ai.deepseek.dshphone.model.FileLinkTarget) -> Unit)? = null,
     /** 会话内查找的查询词；空串表示不画高亮。 */
     findQuery: String = "",
     /** 这一块所属的行是否查找栏当前停靠的命中行。 */
@@ -157,8 +162,8 @@ fun MarkdownText(
 ) {
     val doc = remember(text) { parseMarkdown(text) }
     val findStyle = if (findQuery.isBlank()) null else findSpanStyle(findActive)
-    val scope = remember(doc, fileMentions, findQuery, findStyle) {
-        MarkdownScope(doc.tasks, fileMentions, onOpenFile, findQuery, findStyle)
+    val scope = remember(doc, fileMentions, onOpenFile, onOpenLink, findQuery, findStyle) {
+        MarkdownScope(doc.tasks, fileMentions, onOpenFile, onOpenLink, findQuery, findStyle)
     }
     Column(modifier = modifier.fillMaxWidth()) {
         RenderBlocks(doc.document, scope, depth = 0, compact = false)
@@ -555,6 +560,7 @@ private fun inlineText(parent: Node, scope: MarkdownScope): AnnotatedString = bu
     val linkColor = MaterialTheme.colorScheme.primary
     val codeBackground = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f)
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val linkStyle = SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)
     fun walk(node: Node?) {
         var child = node
         while (child != null) {
@@ -567,22 +573,36 @@ private fun inlineText(parent: Node, scope: MarkdownScope): AnnotatedString = bu
             when (current) {
                 is MdText -> appendRun(current.literal)
                 is Code -> {
-                    // 行内代码若正好是本轮产出的文件，就变成可点的提及，点开只读预览。
-                    val path = if (scope.mentions.isEmpty()) null
+                    // 行内代码若是文件就变成可点的提及：先看本轮产物词表（Web 的
+                    // fileMentions 口径），词表里没有再看 token 本身是否明确是个文件路径。
+                    val mention = if (scope.mentions.isEmpty()) null
                     else TurnDeliverables.resolveMention(current.literal, scope.mentions)
+                    val guessed = if (mention == null && scope.onOpenLink != null) {
+                        FileLink.parseInlineCode(current.literal)
+                    } else {
+                        null
+                    }
                     val codeStyle = SpanStyle(
                         fontFamily = FontFamily.Monospace,
                         background = codeBackground,
                         fontSize = 0.92.em,
                         letterSpacing = 0.sp,
-                        color = if (path != null) linkColor else Color.Unspecified,
+                        color = if (mention != null || guessed != null) linkColor else Color.Unspecified,
                     )
                     // 底色紧贴字形很难看，用窄空格在两侧垫出内边距。
                     val padded = "\u2009" + current.literal + "\u2009"
-                    if (path != null) {
+                    if (mention != null) {
                         pushLink(
                             LinkAnnotation.Clickable("mention", TextLinkStyles(codeStyle)) {
-                                scope.onOpenFile(path)
+                                scope.onOpenFile(mention)
+                            }
+                        )
+                        appendRun(padded)
+                        pop()
+                    } else if (guessed != null) {
+                        pushLink(
+                            LinkAnnotation.Clickable("file-path", TextLinkStyles(codeStyle)) {
+                                scope.onOpenLink?.invoke(guessed)
                             }
                         )
                         appendRun(padded)
@@ -599,14 +619,24 @@ private fun inlineText(parent: Node, scope: MarkdownScope): AnnotatedString = bu
                     SpanStyle(textDecoration = TextDecoration.LineThrough, color = muted)
                 ) { walk(current.firstChild) }
                 is Link -> {
-                    pushLink(
-                        LinkAnnotation.Url(
-                            current.destination,
-                            TextLinkStyles(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)),
+                    // 工作区文件（相对路径、绝对路径、file://、dsh-resource://file/…）
+                    // 不是浏览器地址：Web 用 dsh-resource 地址在右侧栏打开，手机端在这里
+                    // 转成"读回来交给系统查看器"。其余地址（http/https/mailto/…）
+                    // 仍交给系统，由 LinkAnnotation.Url 处理。
+                    val file = FileLink.parse(current.destination)
+                    if (file != null && scope.onOpenLink != null) {
+                        pushLink(
+                            LinkAnnotation.Clickable("file-link", TextLinkStyles(linkStyle)) {
+                                scope.onOpenLink?.invoke(file)
+                            }
                         )
-                    )
-                    walk(current.firstChild)
-                    pop()
+                        walk(current.firstChild)
+                        pop()
+                    } else {
+                        pushLink(LinkAnnotation.Url(current.destination, TextLinkStyles(linkStyle)))
+                        walk(current.firstChild)
+                        pop()
+                    }
                 }
                 is Image -> withStyleSpan(SpanStyle(fontStyle = FontStyle.Italic, color = muted)) {
                     walk(current.firstChild)

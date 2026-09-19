@@ -3,6 +3,7 @@ package ai.deepseek.dshphone.ui.component
 import ai.deepseek.dshphone.i18n.Strings
 import ai.deepseek.dshphone.model.*
 import ai.deepseek.dshphone.net.*
+import ai.deepseek.dshphone.state.PhoneModel
 import ai.deepseek.dshphone.ui.theme.Dimens
 import ai.deepseek.dshphone.ui.theme.DshChrome
 import androidx.compose.foundation.background
@@ -252,9 +253,23 @@ private fun JsonContainer(label: String, key: String?, children: List<Pair<Strin
     }
 }
 
-/** 工具结果：按 resultView.card 分派。 */
+/**
+ * 工具结果：先看图片块，再按 resultView.card 分派。
+ *
+ * read_image 与任何"结果里带 image 块"的工具调用都在这里画持久化图片：字节不在这条
+ * 消息里，拿 attachmentId 走 session/attachment（[PhoneModel.attachmentImage]）。
+ */
 @Composable
-fun ToolResultView(result: ToolResultData) {
+fun ToolResultView(result: ToolResultData, sessionId: SessionId? = null, model: PhoneModel? = null) {
+    val images = if (result.isError) emptyList() else imageReferences(result.content) ?: lenientImageRefs(result.content)
+    if (images.isNotEmpty() && sessionId != null && model != null) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            images.forEach { ref -> AttachmentImage(sessionId, ref, model) }
+            val text = imageTexts(result.content) ?: toolResultText(result)
+            if (text.isNotEmpty()) MonospaceBlock(text)
+        }
+        return
+    }
     val card = result.resultView["card"].str
     when {
         result.isError -> MonospaceBlock(toolResultText(result), MaterialTheme.colorScheme.error)
@@ -361,47 +376,98 @@ fun toolVariantIcon(variant: ToolRowVariant): ImageVector = when (variant) {
     ToolRowVariant.OTHERS -> Icons.Default.Build
 }
 
-/** 工具调用卡片：与思考卡同一种行，点开同一种详情弹层。 */
+/**
+ * 工具调用卡片：与思考卡同一种行，点开同一种详情弹层。
+ *
+ * 两层协议在这里落地：
+ *  - read_image 的卡身就是那张图（Web 的 tool.call.images 槽位，imageCardModel）；
+ *  - run_code 里派发的子调用（tool/ptc-dispatch*）按 Web 的工具树缩进一层挂在父行下面，
+ *    子调用自己的 read_image 图片同样画在自己的卡身里。
+ */
 @Composable
-fun ToolCard(data: ToolChatData, cwd: String?, findQuery: String = "", findActive: Boolean = false) {
-    var detail by remember { mutableStateOf(false) }
-    val model = remember(data, cwd) { toolRowModel(data, cwd) }
-    val tint = when (model.state) {
+fun ToolCard(
+    data: ToolChatData,
+    cwd: String?,
+    findQuery: String = "",
+    findActive: Boolean = false,
+    sessionId: SessionId? = null,
+    model: PhoneModel? = null,
+    depth: Int = 0,
+) {
+    var detail by remember(data.callId) { mutableStateOf(false) }
+    val rowModel = remember(data, cwd) { toolRowModel(data, cwd) }
+    val imageCard = remember(data, cwd) { readImageCard(data) }
+    val tint = when (rowModel.state) {
         ToolRowState.ERROR ->
-            if (model.variant == ToolRowVariant.CODE) Color(0xFFE08600) else MaterialTheme.colorScheme.error
+            if (rowModel.variant == ToolRowVariant.CODE) Color(0xFFE08600) else MaterialTheme.colorScheme.error
         ToolRowState.STOPPED -> Color(0xFFE08600)
         else -> DshChrome.label
     }
-    val icon = when (model.state) {
+    val icon = when (rowModel.state) {
         ToolRowState.ERROR -> Icons.Default.Warning
         ToolRowState.STOPPED -> Icons.Default.PauseCircle
-        else -> toolVariantIcon(model.variant)
+        else -> toolVariantIcon(rowModel.variant)
     }
-    CardRow(
-        icon = icon,
-        summary = model.errorSummary ?: model.summary,
-        suffix = model.summarySuffix,
-        tint = tint,
-        running = model.state == ToolRowState.RUNNING,
-        onClick = { detail = true },
-        findQuery = findQuery,
-        findActive = findActive,
-    )
+    Column(Modifier.fillMaxWidth()) {
+        CardRow(
+            icon = icon,
+            summary = rowModel.errorSummary ?: rowModel.summary,
+            suffix = rowModel.summarySuffix,
+            tint = tint,
+            running = rowModel.state == ToolRowState.RUNNING,
+            onClick = { detail = true },
+            findQuery = findQuery,
+            findActive = findActive,
+        )
+        if (imageCard != null && sessionId != null && model != null) {
+            ToolImageCard(imageCard, sessionId, model)
+        }
+        if (depth < 8) {
+            data.subCalls.forEach { child ->
+                Box(Modifier.padding(start = 18.dp)) {
+                    ToolCard(child, cwd, findQuery, findActive, sessionId, model, depth + 1)
+                }
+            }
+        }
+    }
     if (detail) {
-        val title = model.summary.substringBefore('\n').ifEmpty { data.name }
+        val title = rowModel.summary.substringBefore('\n').ifEmpty { data.name }
         val copyText = buildList {
             if (data.argsRaw.isNotEmpty()) add(prettyJson(data.argsRaw))
             data.result?.let { add(toolResultText(it)) }
         }.joinToString("\n\n")
-        CardDetailDialog(toolVariantIcon(model.variant), title, copyText, { detail = false }) {
+        CardDetailDialog(toolVariantIcon(rowModel.variant), title, copyText, { detail = false }) {
             if (data.argsRaw.isNotEmpty()) {
                 DetailSection(Strings.toolInput) { MonospaceBlock(prettyJson(data.argsRaw)) }
             }
             data.result?.let { result ->
                 Spacer(Modifier.height(16.dp))
-                DetailSection(Strings.toolOutput) { ToolResultView(result) }
+                DetailSection(Strings.toolOutput) { ToolResultView(result, sessionId, model) }
+            }
+            if (depth < 8) {
+                data.subCalls.forEach { child ->
+                    Spacer(Modifier.height(16.dp))
+                    DetailSection(child.name) {
+                        if (child.argsRaw.isNotEmpty()) MonospaceBlock(prettyJson(child.argsRaw))
+                        child.result?.let { sub -> ToolResultView(sub, sessionId, model) }
+                    }
+                }
             }
         }
+    }
+}
+
+/** read_image 的卡身：路径标签 + 持久化图片（web imageCardModel 的三件套）。 */
+@Composable
+private fun ToolImageCard(card: ImageCard, sessionId: SessionId, model: PhoneModel) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = 22.dp, top = 4.dp, bottom = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(card.path, style = MaterialTheme.typography.labelSmall, color = DshChrome.label)
+        card.images.forEach { ref -> AttachmentImage(sessionId, ref, model) }
     }
 }
 

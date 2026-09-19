@@ -135,6 +135,8 @@ object Strings {
     val imageTooLarge: String get() = pick("An image exceeds the %s limit.", "有图片超过 %s 上限。")
     val imagesTooLarge: String get() = pick("Images exceed the %s total limit.", "图片总量超过 %s 上限。")
     val imageTypeUnsupported: String get() = pick("%s is not an accepted image type.", "不支持的图片类型：%s。")
+    // 图片块在日志里存在、字节却读不到（未被会话引用或已被清理）：明说，别一直转圈。
+    val imageUnavailable: String get() = pick("Image unavailable", "图片不可用")
     val accessRead: String get() = pick("Read", "只读")
     val accessWrite: String get() = pick("Write", "写入")
     val accessFull: String get() = pick("Full", "完全")
@@ -161,6 +163,16 @@ object Strings {
     val orderManual: String get() = pick("Manual", "手动")
     val archived: String get() = pick("Archived", "已归档")
     val noArchived: String get() = pick("No archived sessions", "没有已归档会话")
+    val restore: String get() = pick("Restore", "恢复")
+    // 改动文件卡片（0.1.6 ui-deliverables）：内容与主机 workspace-changes 插件一一对应。
+    val changedFilesTitle: String get() = pick("%d files changed", "本轮改动 %d 个文件")
+    val changedFilesShowAll: String get() = pick("Show all %d", "展开全部 %d 个")
+    val changedFilesCollapse: String get() = pick("Collapse", "收起")
+    val changedFilesBinary: String get() = pick("Binary", "二进制")
+    val changedFilesOversized: String get() = pick("Too large to compare", "文件过大，无法比较")
+    val changedFilesNoLines: String get() = pick("No changes", "内容没有变化")
+    val changedFilesCoarse: String get() = pick("Comparison timed out; every line is shown as replaced", "比较超时，已按整文件替换显示")
+    val changedFilesUnavailable: String get() = pick("Couldn’t load this file’s changes", "无法读取该文件的改动")
     val reconnecting: String get() = pick("Reconnecting…", "重连中…")
     val sessionGone: String get() = pick("This session is no longer on the host.", "该会话已在主机上消失。")
     val pairingExpired: String get() = pick("Pairing expired — scan the QR code again.", "配对已失效，请重新扫描二维码。")
@@ -205,6 +217,13 @@ object Strings {
     val fileLoading: String get() = pick("Loading file…", "正在加载文件…")
     val fileEmpty: String get() = pick("This file is empty", "这个文件是空的")
     val fileUnavailable: String get() = pick("Couldn’t open this file", "无法打开此文件")
+    /** 文件链接：读回本机再交给系统文本查看器时的进行态。 */
+    val openInSystemViewer: String get() = pick("Opening in a text viewer…", "正在用文本查看器打开…")
+    /** 设备上一个能接文本的 App 都没有，退回内嵌预览。 */
+    val openInSystemViewerUnavailable: String get() =
+        pick("No text viewer on this device. You can use the built-in preview instead.", "本机没有可用的文本查看器，可改用内置预览。")
+    /** 系统查看器不可用时的退路：用应用内的只读预览打开。 */
+    val previewFallback: String get() = pick("Built-in preview", "内置预览")
     val cancel: String get() = pick("Cancel", "取消")
     val done: String get() = pick("Done", "完成")
     val close: String get() = pick("Close", "关闭")

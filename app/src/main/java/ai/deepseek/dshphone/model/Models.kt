@@ -163,16 +163,48 @@ data class ModelDirectoryState(
 @Serializable
 data class PermissionPresetOption(val value: String, val name: String, val description: String? = null)
 
+/**
+ * `permissions` 会话投影的 wire 值：在位的那个选择。
+ *
+ * 0.1.6 把这个投影收窄成只剩 currentValue，可选预设改由 [PermissionCatalogValue] 的另一条 RPC
+ * 发布；`options` 仍保留且可缺省，因为 0.1.5 主机仍把列表内联在这里，客户端要能连两个版本。
+ */
 @Serializable
 data class PermissionSelectValue(
     val options: List<PermissionPresetOption> = emptyList(),
     val currentValue: String = "",
+)
+
+/** `permissionPresets/catalog` 发布的进程级预设目录。 */
+@Serializable
+data class PermissionCatalogValue(val options: List<PermissionPresetOption> = emptyList())
+
+/**
+ * 一个会话能提供的权限选择：在位的当前值 + 候选预设。
+ *
+ * 两半来自不同来源（0.1.6 是投影 + RPC，0.1.5 只有投影），合并后各界面只读这一个值。
+ * catalog 一旦拉到就优先；否则退回投影内联的那份（0.1.5 主机）。
+ */
+data class PermissionSelection(
+    val currentValue: String,
+    val options: List<PermissionPresetOption>,
 ) {
     val currentOption: PermissionPresetOption? get() = options.firstOrNull { it.value == currentValue }
     val selectableOptions: List<PermissionPresetOption> get() = options.filter { it.value != "custom" }
+
+    companion object {
+        fun merge(projection: PermissionSelectValue?, catalog: List<PermissionPresetOption>?): PermissionSelection? {
+            if (projection == null) return null
+            return PermissionSelection(projection.currentValue, catalog ?: projection.options)
+        }
+    }
 }
 
 // 附件 ————————————————————————————————————————————————————————
+
+/** 归一化缩放前的输入尺寸；只有被缩放过的图片才有（web 的 originalDimensions）。 */
+@Serializable
+data class ImageDimensions(val width: Int = 0, val height: Int = 0)
 
 @Serializable
 data class ImageAttachmentRef(
@@ -182,6 +214,7 @@ data class ImageAttachmentRef(
     val width: Int = 0,
     val height: Int = 0,
     val name: String? = null,
+    val originalDimensions: ImageDimensions? = null,
 )
 
 @Serializable

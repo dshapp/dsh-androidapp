@@ -134,7 +134,11 @@ class SessionStore(val sessionId: SessionId) {
         private set
     var imageLimits by mutableStateOf<ImageAttachmentLimits?>(null)
         private set
-    var permissions by mutableStateOf<PermissionSelectValue?>(null)
+    /** `permissions` 投影（0.1.6 只带 currentValue，0.1.5 还内联候选）。 */
+    private var permissionProjection by mutableStateOf<PermissionSelectValue?>(null)
+    /** `permissionPresets/catalog` 拉到之前的候选是空的，退回投影内联的那份。 */
+    private var permissionCatalogOptions: List<PermissionPresetOption>? = null
+    var permissions by mutableStateOf<PermissionSelection?>(null)
         private set
     var modelDirectory by mutableStateOf(ModelDirectoryState())
     var turnRail by mutableStateOf<List<TurnRailItem>>(emptyList())
@@ -172,6 +176,8 @@ class SessionStore(val sessionId: SessionId) {
     private var sawSystemPrompt = false
     private val turnEndBoundaries = mutableListOf<Pair<Int, Double>>()
     private val presentedByTurn = mutableMapOf<Int, MutableList<PresentedFile>>()
+    /** 每轮最新的 `workspace/changes` 公告 seq（见 [changesAddress]）。 */
+    private val changesSeqByTurn = mutableMapOf<Int, Int>()
     private val producedPathsByTurn = mutableMapOf<Int, MutableList<String>>()
     private val closingAssistantStepByTurn = mutableMapOf<Int, Int>()
     private val turnAnchorRows = mutableMapOf<Int, String>()
@@ -510,8 +516,10 @@ class SessionStore(val sessionId: SessionId) {
             "assistant/attempt" -> applyAssistantAttempt(event)
             "tool/call" -> applyToolCall(event, view)
             "tool/result" -> applyToolResult(event, view)
-            "tool/code-dispatch-start" -> applySubcallStart(event)
-            "tool/code-dispatch" -> applySubcallEnd(event)
+            // PTC 子调用：0.1.6 起主机把 code-dispatch 改名成 ptc-dispatch，
+            // 旧日志里的 code-dispatch 仍然要能解（Web 端两个都收）。
+            "tool/ptc-dispatch-start", "tool/code-dispatch-start" -> applySubcallStart(event)
+            "tool/ptc-dispatch", "tool/code-dispatch" -> applySubcallEnd(event)
             "turn/start" -> applyTurnStart(event)
             "turn/end" -> applyTurnEnd(event)
             "step/start" -> applyStepStart(event)
@@ -523,6 +531,8 @@ class SessionStore(val sessionId: SessionId) {
             "tool-workflow/agent-end", "tool-workflow/run-end" -> applyWorkflow(event)
             "session/title" -> event.data["title"].str?.let { title = it }
             "deliverables/presented" -> applyPresented(event)
+            // 只带轮次，本身不画任何东西：汇总与 diff 要按这条事件的 seq 去主机读。
+            "workspace/changes" -> applyWorkspaceChanges(event)
             "system/message" -> applySystemPrompt(event)
             else -> applyUnknownSurface(event)
         }
@@ -846,6 +856,8 @@ class SessionStore(val sessionId: SessionId) {
             time = event.time,
             content = (data["content"].arr ?: emptyList()).map { decodeContentBlock(it) },
             isError = data["isError"].bool ?: false,
+            error = data["error"]?.let { ToolError(it["name"].str ?: "", it["code"].str ?: "") },
+            meta = data["meta"],
         )
         contexts[key] = NodeContext.Tool(child)
     }
@@ -1170,7 +1182,9 @@ class SessionStore(val sessionId: SessionId) {
         tokenUsage = null
         sessionStats = null
         imageLimits = null
-        permissions = null
+        permissionProjection = null
+        changesSeqByTurn.clear()
+        refreshPermissions()
         for ((key, pair) in projections) decodeSingleProjection(key, pair.first)
     }
 
@@ -1209,7 +1223,14 @@ class SessionStore(val sessionId: SessionId) {
             "tokenUsage" -> tokenUsage = value.decodeOrNull<TokenUsage>()
             "sessionStats" -> sessionStats = value.decodeOrNull<SessionStatsProjection>()
             "imageLimits" -> imageLimits = value.decodeOrNull<ImageAttachmentLimits>()
-            "permissions" -> value.decodeOrNull<PermissionSelectValue>()?.let { permissions = it }
+            "permissions" -> value.decodeOrNull<PermissionSelectValue>()?.let {
+                permissionProjection = it
+                refreshPermissions()
+            }
+            "inbox" ->
+                // 0.1.6 把待发队列从 session/control 挪到了这里。投影发布的是整条消息，
+                // 行位置（queued / steering / context）由客户端本地推导，再按原快照语义整体应用。
+                decodeInbox(value)?.let { applyQueue(rowsFromInbox(it)) }
             "agentPreset" -> value.str?.takeIf { it.isNotEmpty() }?.let { agentPreset = it }
             "modelSelection" -> value["next"]?.decodeOrNull<ModelSelection>()?.let {
                 modelDirectory = modelDirectory.applyProjectedSelection(it)
@@ -1549,12 +1570,46 @@ class SessionStore(val sessionId: SessionId) {
 
     fun setQuestion(question: QuestionRequested?) { pendingQuestion = question }
 
-    fun setQueue(frame: SessionQueueFrame) {
-        val observed = frame.items.mapNotNull { it.rpcId }.toSet()
+    /**
+     * 记下一条 `workspace/changes` 公告（对齐 Mac `applyWorkspaceChanges`）。
+     *
+     * 事件本身没有 surfaceOp，不会渲染成任何节点；它只负责把「这一轮有改动记录」传进来，
+     * 具体内容由 UI 按 [changesAddress] 去主机读。同一轮后来的公告取代先前的地址。
+     */
+    private fun applyWorkspaceChanges(event: SessionEvent) {
+        val turn = event.data["turn"].int ?: return
+        if (turn < 1) return
+        changesSeqByTurn[turn] = event.seq
+        deliverablesRevision += 1
+    }
+
+    /** 某个轮次的改动记录地址；没有公告过就是 null（不画卡片）。 */
+    fun changesAddress(turn: Int): TurnChangesAddress? =
+        changesSeqByTurn[turn]?.let { TurnChangesAddress(sessionId, it) }
+
+    /**
+     * 记下进程级权限目录（0.1.6 的 `permissionPresets/catalog`）。
+     *
+     * 目录随主机实时贡献变化，与某个会话的历史无关，所以由 PhoneModel 拉到后广播给每个 store；
+     * 没拉到（0.1.5 主机没有这条 RPC）时保持 null，退回投影内联的那份。
+     */
+    fun setPermissionCatalog(options: List<PermissionPresetOption>?) {
+        permissionCatalogOptions = options
+        refreshPermissions()
+    }
+
+    /** 投影与目录合并成界面读的那一个值；两半谁后到都能收敛。 */
+    private fun refreshPermissions() {
+        permissions = PermissionSelection.merge(permissionProjection, permissionCatalogOptions)
+    }
+
+    /** 整体应用一份待发队列（快照语义：传进来的是这一时刻的全部）。 */
+    fun applyQueue(items: List<QueuedInboxItem>) {
+        val observed = items.mapNotNull { it.rpcId }.toSet()
         if (observed.isNotEmpty()) {
             pendingSubmissions = pendingSubmissions.filterNot { it.requestId in observed }
         }
-        if (queue != frame.items) queue = frame.items
+        if (queue != items) queue = items
     }
 
     fun setJobs(frame: SessionJobsFrame) { jobs = frame.jobs }

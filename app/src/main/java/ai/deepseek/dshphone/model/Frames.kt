@@ -14,6 +14,7 @@ import ai.deepseek.dshphone.net.obj
 import ai.deepseek.dshphone.net.str
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 
 // 可应答的审批 / 提问 ——————————————————————————————————————————
@@ -122,6 +123,11 @@ data class QueuedInboxItem(
     val text: String get() = content.mapNotNull { it["text"].str }.joinToString(" ")
 }
 
+/**
+ * 0.1.5 的 control 队列条目：条目自带 placement，message 里只有 content。
+ *
+ * 0.1.6 删掉了这条通道（见 [decodeControlFrame]），保留它是为了让客户端仍能连 0.1.5 主机。
+ */
 fun decodeQueuedItem(value: JsonElement?): QueuedInboxItem? {
     val id = value["id"].str ?: return null
     return QueuedInboxItem(
@@ -130,6 +136,64 @@ fun decodeQueuedItem(value: JsonElement?): QueuedInboxItem? {
         rpcId = value["rpcId"].str,
         content = value["message"]["content"].arr ?: emptyList(),
     )
+}
+
+// —— 0.1.6 的 inbox 会话投影 ————————————————————————————————
+
+/**
+ * inbox 投影里的一条待发消息（主机侧的整条 user message）。
+ *
+ * 0.1.5 由 control 流发布的条目只带呈现所需字段；0.1.6 改成投影发布整条消息，
+ * 因此 placement 不再由主机给，而是由客户端按「它在哪个列表里」推导（见 [rowsFromInbox]）。
+ */
+data class QueuedInboxMessage(
+    val id: MessageId,
+    val role: String?,
+    val content: List<JsonElement>,
+    val source: JsonElement?,
+) {
+    /** 浏览器提交的消息在 source 里带着 prompt-RPC 身份，用来退掉本地回声。 */
+    val rpcId: String? get() = source?.takeIf { it["kind"].str == "user" }?.let { it["rpcId"].str }
+}
+
+/** `inbox` 会话投影的 wire 值：两个有序的待发列表。 */
+data class SessionInboxValue(
+    val nextTurn: List<QueuedInboxMessage> = emptyList(),
+    val nextStep: List<QueuedInboxMessage> = emptyList(),
+)
+
+fun decodeInbox(value: JsonElement?): SessionInboxValue? {
+    if (value == null || value is JsonNull) return null
+    fun messages(key: String): List<QueuedInboxMessage> =
+        (value[key].arr ?: emptyList()).mapNotNull { item ->
+            val id = item["id"].str ?: return@mapNotNull null
+            QueuedInboxMessage(
+                id = id,
+                role = item["role"].str,
+                content = item["content"].arr ?: emptyList(),
+                source = item["source"],
+            )
+        }
+    return SessionInboxValue(nextTurn = messages("next-turn"), nextStep = messages("next-step"))
+}
+
+/**
+ * 把一份 inbox 投影摊成待发队列行，主机顺序在前。
+ *
+ * next-turn 是「下一轮才会取走」的排队项；next-step 里由用户写的（source.kind == "user"）
+ * 是已点插队、等下一个步骤边界送进当前回合的项，其余是上下文注入。与 Mac 的
+ * QueuedInboxItem.rows(fromInbox:) 同一口径。
+ */
+fun rowsFromInbox(value: SessionInboxValue): List<QueuedInboxItem> {
+    fun row(message: QueuedInboxMessage, placement: String) = QueuedInboxItem(
+        id = message.id,
+        placement = placement,
+        rpcId = message.rpcId,
+        content = message.content,
+    )
+    val turn = value.nextTurn.map { row(it, "queued") }
+    val step = value.nextStep.map { row(it, if (it.source?.get("kind")?.str == "user") "steering" else "context") }
+    return turn + step
 }
 
 data class SessionQueueFrame(val sessionId: SessionId, val items: List<QueuedInboxItem>)

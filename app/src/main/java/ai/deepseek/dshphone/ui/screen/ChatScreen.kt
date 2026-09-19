@@ -64,7 +64,14 @@ fun ChatScreen(
     var showPanel by remember { mutableStateOf(false) }
     var moreMenu by remember { mutableStateOf(false) }
     var turnMenu by remember { mutableStateOf(false) }
-    var preview by remember { mutableStateOf<String?>(null) }
+    // 系统查看器落地不了时（读不回来、设备上没有能看文本的 App）退回的内嵌预览。
+    var preview by remember { mutableStateOf<FileLinkTarget?>(null) }
+    // 点击文件链接后"读回本机再交给系统查看器"的一刻：读不出或不落地时
+    // 用这个状态给出原因，而不是点了没反应。
+    var fileLinkState by remember { mutableStateOf<FileLinkOpenState?>(null) }
+    // 每次点击都算一次新尝试：同一个链接失败后再点一次要能重来，
+    // 只比较 target 的话状态没变、effect 不会重跑。
+    var fileLinkAttempt by remember { mutableStateOf(0L) }
     val listState = rememberLazyListState()
     /// 正在为跳转分页的轮次；分页期间整份轮次菜单不可点（对齐 iOS 的 TurnRailState.busy）。
     var railBusyTurn by remember(sessionId) { mutableStateOf<Int?>(null) }
@@ -76,6 +83,12 @@ fun ChatScreen(
     val clipboard = LocalClipboardManager.current
     val findFocus = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
+
+    // 文件链接（行内产物提及与 Markdown 链接）都走这一条：先读回本机交给系统文本查看器。
+    fun openFileLink(target: FileLinkTarget) {
+        fileLinkAttempt += 1
+        fileLinkState = FileLinkOpenState.Creating(target, fileLinkAttempt)
+    }
 
     // 退出查找统一走这里：先收键盘再拆输入框，避免软键盘留在屏幕上空占半屏。
     val exitFind = {
@@ -435,7 +448,8 @@ fun ChatScreen(
                             sessionId = sessionId,
                             model = model,
                             store = store,
-                            onOpenFile = { preview = it },
+                            onOpenFile = { path -> openFileLink(FileLinkTarget(path)) },
+                            onOpenLink = { target -> openFileLink(target) },
                             onFork = { seq ->
                                 scope.launch { model.fork(sessionId, seq)?.let(onOpenSession) }
                             },
@@ -484,7 +498,8 @@ fun ChatScreen(
                         sessionId = sessionId,
                         model = model,
                         store = store,
-                        onOpenFile = { preview = it },
+                        onOpenFile = { path -> openFileLink(FileLinkTarget(path)) },
+                        onOpenLink = { target -> openFileLink(target) },
                         onFork = {},
                     )
                 }
@@ -540,8 +555,20 @@ fun ChatScreen(
     if (showPanel) {
         SessionPanelSheet(model, sessionId, { showPanel = false }, onOpenSession)
     }
-    preview?.let { path ->
-        FilePreviewSheet(model, sessionId, path) { preview = null }
+    preview?.let { target ->
+        FilePreviewSheet(model, target.sessionId ?: sessionId, target.path) { preview = null }
+    }
+    fileLinkState?.let { state ->
+        FileLinkOpenDialog(
+            model = model,
+            sessionId = sessionId,
+            state = state,
+            onDismiss = { fileLinkState = null },
+            onFallbackPreview = { target ->
+                fileLinkState = null
+                preview = target
+            },
+        )
     }
     store?.pendingApproval?.let { approval ->
         ApprovalSheet(model, approval) { store.setApproval(null) }

@@ -80,4 +80,7 @@ dependencies {
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // 协议解码的 JVM 单测；见 src/test 里的 Protocol016Test。
+    testImplementation("junit:junit:4.13.2")
 }

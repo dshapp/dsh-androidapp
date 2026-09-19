@@ -1,5 +1,6 @@
 package ai.deepseek.dshphone.state
 
+import ai.deepseek.dshphone.ExternalOpenResult
 import ai.deepseek.dshphone.i18n.Strings
 import ai.deepseek.dshphone.i18n.fmt
 import ai.deepseek.dshphone.model.*
@@ -92,6 +93,14 @@ class PhoneModel private constructor(app: Application) {
 
     private val appContext = app.applicationContext
 
+    /** 把工作区文件落到缓存并交给系统文本查看器（见 [ai.deepseek.dshphone.FileOpener]）。 */
+    private val fileOpener = ai.deepseek.dshphone.FileOpener(appContext)
+
+    init {
+        // 缓存目录里的旧文件是上次进程留下的：启动清一次，别让它无限长。
+        fileOpener.prune()
+    }
+
     /**
      * 替代原来的 `viewModelScope`：作用域跟着进程走，不跟 Activity 走。
      * `SupervisorJob` 让一个子任务失败不会连坐掉整个连接循环。
@@ -106,6 +115,18 @@ class PhoneModel private constructor(app: Application) {
     val settings = SettingsStore(appContext)
 
     val listStore = SessionListStore(prefs)
+    /** 每轮改动文件的汇总与比较（0.1.6 的 ui-deliverables 路由）。 */
+    val turnChanges = TurnChangesStore(scope)
+
+    /** 按公告地址读一次那一轮的改动汇总；UI 不必自己拿 APIClient。 */
+    fun loadTurnChanges(address: TurnChangesAddress) {
+        api?.let { turnChanges.load(address, it) }
+    }
+
+    /** 读一次某个列出的文件的比较。 */
+    fun loadTurnChangesDiff(address: TurnChangesAddress, index: Int) {
+        api?.let { turnChanges.loadDiff(address, index, it) }
+    }
     /**
      * 本机缓存。用来 stale-while-revalidate：先把上次的清单/窗口画出来，
      * 远端基线回来整体替换。谁也没连接上时（profile 为空）静默不用。
@@ -133,6 +154,9 @@ class PhoneModel private constructor(app: Application) {
     var appIsActive by mutableStateOf(false)
     var lastErrorMessage by mutableStateOf<String?>(null)
     var agentPresets by mutableStateOf<List<AgentPresetEntry>>(emptyList())
+        private set
+    /** 进程级权限目录（0.1.6）；0.1.5 主机上始终是空的，各 store 退回投影内联的候选。 */
+    var permissionCatalog by mutableStateOf<List<PermissionPresetOption>>(emptyList())
         private set
     var searchHits by mutableStateOf<List<SessionSearchItem>?>(null)
         private set
@@ -250,6 +274,8 @@ class PhoneModel private constructor(app: Application) {
             connectedProfileId = profile.id
             streamCoordinator.start()
             refreshInternal(markConnected = profile.id)
+            // catalog 与列表并行拉：它是进程级的，拉不到（0.1.5 主机）也不影响连上。
+            loadPermissionCatalog()
         }
     }
 
@@ -306,6 +332,8 @@ class PhoneModel private constructor(app: Application) {
         scope.launch {
             when (event) {
                 "agent-preset/selected", "settings/document-updated" -> loadAgentPresets()
+                // 主机实时贡献改变就叫一声，目录要跟着重拉。
+                "permission-presets/catalog-changed" -> loadPermissionCatalog()
             }
             if (event == "llm/adapters-updated" || event == "settings/document-updated") {
                 sessions.keys.toList().forEach { loadModels(it) }
@@ -317,6 +345,8 @@ class PhoneModel private constructor(app: Application) {
     private fun handleSessionRemoved(sessionId: SessionId) {
         sessions.remove(sessionId)
         listStore.remove(sessionId)
+        // 改动记录是主机在会话存活期间才提供的东西，会话没了就整批丢掉。
+        turnChanges.closeAll(sessionId)
         // 会话在主机侧没了，缓存里的窗口跟着删，别让下一屏画出幽灵会话。
         cache?.let { sessionCache -> scope.launch(Dispatchers.IO) { sessionCache.removeWindow(sessionId) } }
         if (selectedSessionId == sessionId) {
@@ -356,6 +386,8 @@ class PhoneModel private constructor(app: Application) {
         sessions.getOrPut(id) {
             SessionStore(id).also { store ->
                 seedFromSummary(store)
+                // 目录是进程级的、不随会话走，新建的 store 也得补上那份已经在手里的。
+                store.setPermissionCatalog(permissionCatalog.takeIf { it.isNotEmpty() })
                 coordinator?.hydrateControlState(store)
             }
         }
@@ -846,6 +878,26 @@ class PhoneModel private constructor(app: Application) {
     }
 
     /**
+     * 恢复一条已归档会话（0.1.6 新增的 `workspace/unarchiveSession`）。
+     *
+     * 归档时本地把它从列表里摘掉了，恢复成功后必须重拉列表才回得来；返回的归档集合同步应用，
+     * 归档页不必等下一次 `workspace/follow` 帧。老主机上这条 RPC 不存在，失败会走 toast 文案，
+     * 而不是看起来像成功了却没动静。
+     */
+    fun unarchive(sessionId: SessionId) {
+        scope.launch {
+            try {
+                val archived = api?.workspaceUnarchiveSession(sessionId) ?: return@launch
+                workspaceStore.setArchived(archived)
+                listStore.archivedSessionIds = archived
+                refreshInternal()
+            } catch (e: Exception) {
+                lastErrorMessage = describe(e)
+            }
+        }
+    }
+
+    /**
      * 分组拖动换位后的排序（与 Mac `AppModel.moveWorkspace` 同构）：先本地乐观移动，
      * 手指一松就到位；再交给主机 `workspace/insertBefore` 落定，[beforeWorkspaceId]
      * 为空表示挪到末尾。
@@ -878,6 +930,53 @@ class PhoneModel private constructor(app: Application) {
         scope.launch {
             try { api?.hostOpenPath(path) } catch (e: Exception) { lastErrorMessage = describe(e) }
         }
+    }
+
+    /**
+     * 转写里的文件链接：把远端工作区文件读到本机，交给系统文本查看器。
+     *
+     * 与 Web 同一个协议（[workspaceFiles/read] 分页），只是终点不同——Web 在右侧栏
+     * 里就地渲染，手机端没有那个面板，于是转成 `content://` 交给系统 App。
+     * 主机读不回来（文件不存在、太大、不是文本）时返回可展示的失败原因。
+     *
+     * 读的是整份文件而不是首页：系统查看器打开以后就不由我们翻页了，只给第一页
+     * 等于给用户看半截。因此这里按 [workspaceFilePage] 连续翻到 eof，并带一个
+     * 页面上限兜底（超大文本不该把内存吃穿）。
+     */
+    suspend fun openFileInSystemViewer(
+        sessionId: SessionId,
+        target: FileLinkTarget,
+    ): ExternalOpenResult {
+        val path = target.path
+        val scopeId = target.sessionId ?: sessionId
+        val client = api ?: return ExternalOpenResult.Failed(Strings.disconnected)
+        return try {
+            // 空文件也照样交给查看器：让用户看到"它是空的"比一句失败更清楚。
+            val text = readWholeFile(client, scopeId, path)
+            fileOpener.openText(scopeId, path, pathBasename(path), text)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            ExternalOpenResult.Failed(describe(e))
+        }
+    }
+
+    private suspend fun readWholeFile(client: ApiClient, sessionId: SessionId, path: String): String {
+        val builder = StringBuilder()
+        var offset = 1
+        var pages = 0
+        while (pages < MAX_FILE_PAGES) {
+            val page = client.workspaceFileRead(sessionId, path, offset)
+            if (page.lines > 0) {
+                if (builder.isNotEmpty()) builder.append('\n')
+                builder.append(page.text)
+                offset = page.offset + page.lines
+            }
+            pages++
+            if (page.eof || page.lines == 0) break
+        }
+        if (builder.length > MAX_FILE_CHARS) builder.setLength(MAX_FILE_CHARS)
+        return builder.toString()
     }
 
     // —— 子智能体 ——————————————————————————————————————————————
@@ -1045,6 +1144,18 @@ class PhoneModel private constructor(app: Application) {
         runCatching { api?.agentPresetList()?.presets }.getOrNull()?.let { agentPresets = it }
     }
 
+    /**
+     * 拉进程级权限目录（0.1.6 的 `permissionPresets/catalog`）并广播给每个已打开的会话。
+     *
+     * 目录与单个会话的历史无关，拉一次即可；0.1.5 主机没有这条 RPC，失败时保持空，
+     * 各 store 会退回 `permissions` 投影内联的那份，不丢功能。
+     */
+    suspend fun loadPermissionCatalog() {
+        val catalog = runCatching { api?.permissionCatalog() }.getOrNull() ?: return
+        permissionCatalog = catalog
+        sessions.values.forEach { it.setPermissionCatalog(catalog) }
+    }
+
     suspend fun selectAgentPreset(id: String, sessionId: SessionId): Boolean = try {
         api?.agentPresetSelect(sessionId, id)
         true
@@ -1169,6 +1280,17 @@ class PhoneModel private constructor(app: Application) {
          * 比首屏大：用户已经明确在往上翻，一次多给一点少一次往返。
          */
         private const val HISTORY_MESSAGES = 30
+
+        /**
+         * 交给系统查看器时最多读几页。
+         *
+         * 主机一页 5000 行，[MAX_FILE_CHARS] 通常先兜住；页数上限只是防止
+         * "空页但 eof 一直不来"这类主机异常把循环挂死。
+         */
+        private const val MAX_FILE_PAGES = 200
+
+        /** 交给系统查看器的文本上限（字符）：再大就不是"看文件"而是搬数据了。 */
+        private const val MAX_FILE_CHARS = 2_000_000
 
         /**
          * 面向用户的失败文案：把底层异常收敛成一句人话。

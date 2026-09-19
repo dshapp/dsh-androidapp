@@ -1,6 +1,7 @@
 package ai.deepseek.dshphone.net
 
 import ai.deepseek.dshphone.model.AgentPresetListValue
+import ai.deepseek.dshphone.model.ChangedFileDiff
 import ai.deepseek.dshphone.model.CommandDescriptor
 import ai.deepseek.dshphone.model.CommandExecutionValue
 import ai.deepseek.dshphone.model.FileReferenceItem
@@ -9,7 +10,10 @@ import ai.deepseek.dshphone.model.GoalRef
 import ai.deepseek.dshphone.model.GoalViewValue
 import ai.deepseek.dshphone.model.HistoryEntry
 import ai.deepseek.dshphone.model.ModelCatalogValue
+import ai.deepseek.dshphone.model.PermissionCatalogValue
+import ai.deepseek.dshphone.model.PermissionPresetOption
 import ai.deepseek.dshphone.model.SessionAddress
+import ai.deepseek.dshphone.model.TurnChangesSummary
 import ai.deepseek.dshphone.model.SessionAttachmentValue
 import ai.deepseek.dshphone.model.SessionCreateValue
 import ai.deepseek.dshphone.model.SessionForkValue
@@ -219,6 +223,33 @@ suspend fun ApiClient.workspaceArchiveSession(sessionId: SessionId) {
     call("workspace/archiveSession", request { put("sessionId", sessionId) })
 }
 
+// —— 每轮改动文件（0.1.6 的 ui-deliverables 路由） —————————————————
+
+/**
+ * 一轮改动文件的汇总。
+ *
+ * 这是插件路由而不是 Remote 方法：`workspace/changes` 事件只带轮次，汇总（文件与增删行数）
+ * 要按该事件自己的 seq 来这里读。主机在会话销毁后返回 404，那是「没有可显示的东西」，
+ * 因此返回 null 而不是抛错。
+ */
+suspend fun ApiClient.changesSummary(sessionId: SessionId, seq: Int): TurnChangesSummary? =
+    getJson(
+        "api/changes.summary",
+        listOf("sessionId" to sessionId, "seq" to seq.toString()),
+    )?.let { TurnChangesSummary.decode(it) }
+
+/** 一个列出的文件在轮首与轮末的比较；同样以 404 表示主机不再提供。 */
+suspend fun ApiClient.changesDiff(sessionId: SessionId, seq: Int, index: Int): ChangedFileDiff? =
+    getJson(
+        "api/changes.diff",
+        listOf("sessionId" to sessionId, "seq" to seq.toString(), "index" to index.toString()),
+    )?.let { ChangedFileDiff.decode(it) }
+
+/** 恢复已归档会话（0.1.6 新增）；返回主机落定后的完整归档集合。 */
+suspend fun ApiClient.workspaceUnarchiveSession(sessionId: SessionId): List<SessionId> =
+    call("workspace/unarchiveSession", request { put("sessionId", sessionId) })
+        .let { value -> (value["archivedSessionIds"].arr ?: emptyList()).mapNotNull { it.str } }
+
 /**
  * 把一个工作区挪到另一个工作区之前，[beforeWorkspaceId] 为空表示挪到末尾。
  *
@@ -278,6 +309,16 @@ suspend fun ApiClient.commandsExecute(sessionId: SessionId, line: String): Comma
 suspend fun ApiClient.sessionSelectPermission(sessionId: SessionId, presetId: String) {
     commandsExecute(sessionId, "/permission $presetId")
 }
+
+/**
+ * 进程级权限预设目录（0.1.6 新增）。
+ *
+ * 0.1.6 把 `permissions` 会话投影收窄成只剩 currentValue 之后，候选列表只能从这里拿；
+ * 0.1.5 主机没有这条 RPC，调用会以 endpoint-unknown 失败，调用方按 null 处理即可。
+ */
+suspend fun ApiClient.permissionCatalog(): List<PermissionPresetOption> =
+    call("permissionPresets/catalog", JsonObject(emptyMap()))
+        .decodeOrNull<PermissionCatalogValue>()?.options ?: emptyList()
 
 suspend fun ApiClient.skillList(sessionId: SessionId): SkillListValue =
     call("skills/list", request { put("sessionId", sessionId) })

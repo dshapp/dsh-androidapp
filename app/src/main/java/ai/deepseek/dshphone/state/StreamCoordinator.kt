@@ -68,7 +68,15 @@ class StreamCoordinator(
 
     private val removedSessionIds = mutableSetOf<SessionId>()
     private val pendingEventSessions = mutableMapOf<String, SessionId>()
+    /** 0.1.5 的 control 队列状态（baseline 的 queues 块与 queue 帧）；0.1.6 不再有这条通道。 */
     private val queues = mutableMapOf<SessionId, List<QueuedInboxItem>>()
+    /**
+     * 0.1.6 的 `inbox` 会话投影派生的待发队列。
+     *
+     * 0.1.6 把 queue 从 control 基线里删掉了，投影是唯一来源。这里另存一份镜像，是因为
+     * 「基线之后才创建的 store」没有投影历史可回放，只能从这份最新值回灌（对齐 Mac 的 inboxQueues）。
+     */
+    private val inboxQueues = mutableMapOf<SessionId, List<QueuedInboxItem>>()
     private val jobs = mutableMapOf<SessionId, List<JobView>>()
     private val followAddresses = mutableMapOf<SessionId, SessionAddress>()
     private val assistantExpectations = mutableMapOf<SessionId, Pair<String, Int>>()
@@ -225,6 +233,7 @@ class StreamCoordinator(
                 removedSessionIds.add(sessionId)
                 listStore.remove(sessionId)
                 queues.remove(sessionId)
+                inboxQueues.remove(sessionId)
                 jobs.remove(sessionId)
                 unfollow(sessionId)
                 sessionRemovedHandler(sessionId)
@@ -323,33 +332,40 @@ class StreamCoordinator(
                 for (store in allSessions()) hydrateControlState(store)
                 for ((sessionId, block) in frame.projections) {
                     for ((key, value) in block.values) {
-                        sessionLookup(sessionId)?.applyProjection(
-                            SessionProjectionFrame(sessionId, key, value, block.asOfSeq)
-                        )
-                        listStore.updateProjection(sessionId, key, value, block.asOfSeq)
+                        applyControlProjection(SessionProjectionFrame(sessionId, key, value, block.asOfSeq))
                     }
                 }
             }
             is SessionControlFrame.Queue -> {
                 queues[frame.frame.sessionId] = frame.frame.items
-                sessionLookup(frame.frame.sessionId)?.setQueue(frame.frame)
+                sessionLookup(frame.frame.sessionId)?.applyQueue(frame.frame.items)
             }
             is SessionControlFrame.Jobs -> {
                 jobs[frame.frame.sessionId] = frame.frame.jobs
                 sessionLookup(frame.frame.sessionId)?.setJobs(frame.frame)
             }
-            is SessionControlFrame.Projection -> {
-                sessionLookup(frame.frame.sessionId)?.applyProjection(frame.frame)
-                listStore.updateProjection(
-                    frame.frame.sessionId, frame.frame.key, frame.frame.value, frame.frame.seq,
-                )
-            }
+            is SessionControlFrame.Projection -> applyControlProjection(frame.frame)
             SessionControlFrame.Unknown -> Unit
         }
     }
 
+    /**
+     * 折叠一条 control 投影：写进对应的 store，并同步到扁平列表行。
+     *
+     * `inbox` 额外在这里镜像一份：基线之后才创建的 store 没有投影历史，待发队列必须靠
+     * 这份最新值补上，口径等同被删掉的 queue 基线。
+     */
+    private fun applyControlProjection(frame: SessionProjectionFrame) {
+        if (frame.key == "inbox") {
+            decodeInbox(frame.value)?.let { inboxQueues[frame.sessionId] = rowsFromInbox(it) }
+        }
+        sessionLookup(frame.sessionId)?.applyProjection(frame)
+        listStore.updateProjection(frame.sessionId, frame.key, frame.value, frame.seq)
+    }
+
     fun hydrateControlState(store: SessionStore) {
-        store.setQueue(SessionQueueFrame(store.sessionId, queues[store.sessionId] ?: emptyList()))
+        // 0.1.5 走 control 的 queues，0.1.6 走 inbox 投影；两者只会有一个有值。
+        store.applyQueue(queues[store.sessionId] ?: inboxQueues[store.sessionId] ?: emptyList())
         store.setJobs(SessionJobsFrame(store.sessionId, jobs[store.sessionId] ?: emptyList()))
     }
 

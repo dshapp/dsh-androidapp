@@ -456,6 +456,11 @@ fun ArchivedSheet(model: PhoneModel, onDismiss: () -> Unit, onOpen: (SessionId) 
                                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                                 )
                             },
+                            // 恢复入口（0.1.6 的 workspace/unarchiveSession）：归档时本地把它从列表里
+                            // 摘掉了，只靠点击是打不开的，得先让主机把它放回来。
+                            trailingContent = {
+                                TextButton(onClick = { model.unarchive(id) }) { Text(Strings.restore) }
+                            },
                         )
                     }
                 }

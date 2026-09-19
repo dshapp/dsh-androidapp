@@ -8,12 +8,23 @@ import ai.deepseek.dshphone.net.get
 import ai.deepseek.dshphone.net.int
 import ai.deepseek.dshphone.net.str
 import kotlinx.serialization.json.JsonElement
+import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 // 轮次页脚格式化（与 iOS/web 同口径）——————————————————————————
+
+/**
+ * 数字读数的固定区域。
+ *
+ * `String.format` 不带 Locale 时跟设备区域走：德语设备把小数点写成 `,`，阿拉伯语设备连
+ * 千分位和数字形状都换掉，同一台主机在三端显示的数字于是不再一致（web 在中/英两种界面语言
+ * 下都把小数点固定为 `.`、千分位固定为 `,`，Mac 的 formatExactTokens 也把 groupingSeparator
+ * 直接写成 `,`）。本端界面语言只有中/英两种，读数因此也只能跟着界面语言走，不能跟着设备区域走。
+ */
+private val FIXED_LOCALE: Locale = Locale.ROOT
 
 fun formatDuration(ms: Double): String {
     val total = max(0.0, ms / 1000).toInt()
@@ -39,12 +50,14 @@ fun formatStatsDuration(ms: Double): String {
 
 fun formatLatencySeconds(ms: Double): String {
     val s = max(0.0, ms) / 1000
-    return if (s < 10) String.format("%.1f", (s * 10).roundToInt() / 10.0) else String.format("%.0f", s)
+    return if (s < 10) String.format(FIXED_LOCALE, "%.1f", (s * 10).roundToInt() / 10.0)
+    else String.format(FIXED_LOCALE, "%.0f", s)
 }
 
 fun formatTokensPerSecond(tps: Double): String {
     val clamped = max(0.0, tps)
-    return if (clamped >= 10) String.format("%.0f", clamped) else String.format("%.1f", (clamped * 10).roundToInt() / 10.0)
+    return if (clamped >= 10) String.format(FIXED_LOCALE, "%.0f", clamped)
+    else String.format(FIXED_LOCALE, "%.1f", (clamped * 10).roundToInt() / 10.0)
 }
 
 fun turnTotalTokens(usage: TokenUsage): Int {
@@ -54,7 +67,7 @@ fun turnTotalTokens(usage: TokenUsage): Int {
 
 fun formatTokens(value: Int): String {
     fun scaled(candidate: Double): String {
-        if (candidate >= 100) return String.format("%.0f", candidate)
+        if (candidate >= 100) return String.format(FIXED_LOCALE, "%.0f", candidate)
         val tenths = (candidate * 10).roundToInt()
         return if (tenths % 10 == 0) "${tenths / 10}" else "${tenths / 10}.${tenths % 10}"
     }
@@ -63,7 +76,7 @@ fun formatTokens(value: Int): String {
     return scaled(value / 1_000_000.0) + "M"
 }
 
-fun formatExactTokens(value: Int): String = String.format("%,d", value)
+fun formatExactTokens(value: Int): String = String.format(FIXED_LOCALE, "%,d", value)
 
 fun tokenCount(value: Int): String = fmt(Strings.turnUsageCount, formatExactTokens(value))
 
@@ -398,8 +411,8 @@ fun clockTime(ms: Double): String {
 }
 
 fun formatBytes(count: Int): String =
-    if (count >= 1 shl 20) String.format("%.1f MB", count.toDouble() / (1 shl 20))
-    else String.format("%.0f KB", count.toDouble() / 1024)
+    if (count >= 1 shl 20) String.format(FIXED_LOCALE, "%.1f MB", count.toDouble() / (1 shl 20))
+    else String.format(FIXED_LOCALE, "%.0f KB", count.toDouble() / 1024)
 
 // 子智能体会话 id ——————————————————————————————————————————————
 

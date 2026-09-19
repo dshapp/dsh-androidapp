@@ -27,6 +27,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
@@ -145,25 +146,65 @@ fun PairingScreen(onDismiss: () -> Unit, onPaired: (String, String) -> Unit) {
     }
 }
 
+/**
+ * 扫码页在组合期持有的相机资源。
+ *
+ * 单独用普通类而不是 mutableStateOf：这些引用只在监听器里读写，不需要参与重组。
+ */
+private class ScannerResources {
+    var provider: ProcessCameraProvider? = null
+    var analysis: ImageAnalysis? = null
+    var scanner: BarcodeScanner? = null
+    var disposed = false
+
+    /** 停掉分析器并把相机还给系统；重复调用无副作用。 */
+    fun release() {
+        disposed = true
+        // 先清分析器：清掉之后 CameraX 不会再往 executor 上投递，最后一步关线程池就不会
+        // 撞上"往已 shutdown 的 executor execute"。
+        runCatching { analysis?.clearAnalyzer() }
+        runCatching { provider?.unbindAll() }
+        runCatching { scanner?.close() }
+        analysis = null
+        provider = null
+        scanner = null
+    }
+}
+
 @Composable
 private fun QrScanner(onScan: (String) -> Unit) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
+    val resources = remember { ScannerResources() }
     var settled by remember { mutableStateOf(false) }
-    DisposableEffect(Unit) { onDispose { executor.shutdown() } }
+    // 绑定挂在 Activity 生命周期上，Activity 在本页关掉后仍是 RESUMED：不主动 unbind，
+    // 相机就一直开着（指示灯常亮、持续耗电），分析器也还会被调用——而它的 executor 已经
+    // 关停，于是 execute 抛 RejectedExecutionException。离开组合时按"清分析器 → 解绑 →
+    // 关扫描器 → 关线程池"的顺序收干净。
+    DisposableEffect(Unit) {
+        onDispose {
+            resources.release()
+            executor.shutdown()
+        }
+    }
     AndroidView(
         modifier = Modifier.fillMaxSize(),
         factory = { ctx ->
             val previewView = PreviewView(ctx)
             val providerFuture = ProcessCameraProvider.getInstance(ctx)
             providerFuture.addListener({
+                // 相机 provider 是异步就绪的：这张页面可能已经被关掉了，别再绑一次。
+                if (resources.disposed) return@addListener
                 val provider = providerFuture.get()
                 val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
                 val scanner = BarcodeScanning.getClient()
                 val analysis = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
+                resources.provider = provider
+                resources.scanner = scanner
+                resources.analysis = analysis
                 analysis.setAnalyzer(executor) { proxy: ImageProxy ->
                     val media = proxy.image
                     if (media == null || settled) {

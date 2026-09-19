@@ -5,6 +5,7 @@ import ai.deepseek.dshphone.model.isSubagentOrigin
 import ai.deepseek.dshphone.model.sessionDisplayTitle
 import ai.deepseek.dshphone.state.AttentionSignal
 import ai.deepseek.dshphone.state.PhoneModel
+import ai.deepseek.dshphone.state.TurnCardState
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -23,10 +24,8 @@ import androidx.core.app.NotificationManagerCompat
 class AgentNotifications(private val context: Context) {
 
     private val manager = NotificationManagerCompat.from(context)
-    /** 正在跑的会话；完成卡片只在"亲眼看它跑过"之后才发（实时帧丢失时另有基线兜底）。 */
-    private val running = mutableSetOf<String>()
-    /** 已经发过完成卡片的会话，实时帧与基线补发同一天到达时不会互相盖一遍。 */
-    private val deliveredDone = mutableSetOf<String>()
+    /** 完成/失败卡片的去重与抑制规则（含"本轮失败过就不补完成卡"）；判定逻辑见 [TurnCardState]。 */
+    private val cards = TurnCardState()
 
     init {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -44,19 +43,21 @@ class AgentNotifications(private val context: Context) {
             is AttentionSignal.Running -> {
                 val id = signal.sessionId
                 if (signal.running) {
-                    running.add(id)
-                    deliveredDone.remove(id)
-                } else if (running.remove(id)) {
+                    cards.start(id)
+                } else if (cards.stop(id)) {
                     deliverDone(model, id)
                 }
             }
             // 基线里补出来的完成边沿（断线重连、甚至进程被回收后重开）。走同一道
             // 判定，但不去看本地 running 集合——那个集合可能随进程重启没了。
             is AttentionSignal.SessionCompleted -> {
-                running.remove(signal.sessionId)
+                cards.completeFromBaseline(signal.sessionId)
                 deliverDone(model, signal.sessionId)
             }
             is AttentionSignal.Failed -> {
+                // 失败卡才是这一轮的真实结局：记下来，让紧随其后的 turn/end 不再补一张
+                // "这一轮已完成"把失败顶掉（提交前用同一个通知 id，用户只看得到好消息）。
+                cards.fail(signal.sessionId)
                 if (!model.isOnScreen(signal.sessionId)) {
                     post(model, signal.sessionId, Strings.notifyFailed)
                 }
@@ -101,9 +102,9 @@ class AgentNotifications(private val context: Context) {
         post(sessionId, title(model, sessionId), body)
     }
 
-    /** 完成卡片只发一次；"用户正在看这条会话"时不发，但同样标记为已处理。 */
+    /** 完成卡片只发一次，且本轮失败过就不发；"用户正在看这条会话"时不发，但同样标记为已处理。 */
     private fun deliverDone(model: PhoneModel, sessionId: String) {
-        if (!deliveredDone.add(sessionId)) return
+        if (!cards.shouldDeliverDone(sessionId)) return
         if (!model.isOnScreen(sessionId)) post(model, sessionId, Strings.notifyDone)
     }
 

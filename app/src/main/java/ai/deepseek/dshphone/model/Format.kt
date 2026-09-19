@@ -324,7 +324,12 @@ object TurnDeliverables {
             "edit" -> {
                 val old = args["old_string"] as? String
                 val new = args["new_string"] as? String
-                if (old.isNullOrEmpty() || new == null || old == new) null else pathValue(args["file_path"])
+                // replace_all 要么缺省、要么必须是布尔：别的类型说明这次调用畸形，
+                // 不算产出（Web validEditArgs / Mac producedPath 同款校验）。
+                val replaceAll = args["replace_all"]
+                val replaceAllValid = replaceAll == null || replaceAll is Boolean
+                if (old.isNullOrEmpty() || new == null || old == new || !replaceAllValid) null
+                else pathValue(args["file_path"])
             }
             "str_replace_editor" -> editorMutationPath(args)
             else -> null
@@ -337,10 +342,17 @@ object TurnDeliverables {
             "create" -> if (args["file_text"] is String) path else null
             "str_replace" -> {
                 val old = args["old_str"] as? String
-                if (old.isNullOrEmpty()) null else path
+                // new_str 缺省或字符串都行，别的类型整条不算（Web editorMutationPath）。
+                val newStr = args["new_str"]
+                val newStrValid = newStr == null || newStr is String
+                if (old.isNullOrEmpty() || !newStrValid) null else path
             }
             "insert" -> {
-                val line = (args["insert_line"] as? Number)?.toInt()
+                // 必须是整数行号：1.5 这种小数在 Web 走 Number.isInteger 被拒、
+                // Mac 的 as? Int 也拒，toInt() 截断会把它当成合法的第 1 行。
+                val line = (args["insert_line"] as? Number)?.takeIf {
+                    it.toDouble() == Math.floor(it.toDouble()) && !it.toDouble().isInfinite()
+                }?.toLong()
                 if (line != null && line >= 0 && args["new_str"] is String) path else null
             }
             else -> null

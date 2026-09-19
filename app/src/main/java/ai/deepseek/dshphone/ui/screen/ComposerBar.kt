@@ -968,10 +968,36 @@ private fun loadFileAttachment(context: android.content.Context, uri: Uri): Phon
             payload = PhoneAttachmentPayload.Image(mediaType, Base64.encodeToString(bytes, Base64.NO_WRAP), bytes),
         )
     }
-    val copy = File(context.cacheDir, name)
+    val id = java.util.UUID.randomUUID().toString()
+    val copy = File(context.cacheDir, stagedAttachmentFileName(name, id))
     copy.writeBytes(bytes)
-    PhoneAttachment(name = name, payload = PhoneAttachmentPayload.FilePayload(copy))
+    PhoneAttachment(id = id, name = name, payload = PhoneAttachmentPayload.FilePayload(copy))
 }.getOrNull()
+
+/**
+ * 暂存文件在 cacheDir 里的文件名。
+ *
+ * [name] 来自打开文档时读取的 DISPLAY_NAME（或退化到 URI 的最后一段），是用户可见的原始
+ * 文件名；[id] 是这条附件的唯一 id。
+ *
+ * 名字里必须带上 [id]：两个同名文件（两个 README.md）各自有自己的暂存文件，否则后一份
+ * 内容会覆盖前一份，发送时两条附件上传同一份内容。同时要清掉路径分隔符与控制字符——
+ * DISPLAY_NAME 可能含 "/"，而退化路径 uri.lastPathSegment 对 tree URI
+ * （content://…/tree/primary%3ADownload/document/primary%3ADownload%2Ffile.txt）本身就是
+ * "primary:Download/file.txt"，直接当路径写会抛异常被吞掉，附件无声消失。
+ *
+ * 原始文件名仍原样留在 PhoneAttachment.name 上（列表显示、上传时告诉主机用的是它），
+ * 这里只决定本地暂存路径。
+ */
+internal fun stagedAttachmentFileName(name: String, id: String): String {
+    val cleaned = buildString {
+        for (ch in name) {
+            append(if (ch == '/' || ch == '\\' || ch == '\u0000' || ch.isISOControl()) '_' else ch)
+        }
+    }.trim().trim('.').take(120)
+    val safe = if (cleaned.isEmpty() || cleaned == "." || cleaned == "..") "file" else cleaned
+    return "$id-$safe"
+}
 
 private fun displayName(context: android.content.Context, uri: Uri): String? =
     runCatching {

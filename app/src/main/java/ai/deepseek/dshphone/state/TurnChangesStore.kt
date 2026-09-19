@@ -56,10 +56,22 @@ class TurnChangesStore(private val scope: CoroutineScope) {
      * 恰好重启的主机钉死成「没有」。
      */
     fun load(address: TurnChangesAddress, api: ApiClient) {
+        load(address) { api.changesSummary(address.sessionId, address.seq) }
+    }
+
+    /**
+     * 拉取实现的可测入口；生产路径见上面的 [load]。
+     *
+     * 只有 fetch 成功返回 `null`（404，主机明确不再提供）才记成 unavailable；抛出的
+     * 网络异常/超时是传输失败，不能算答案——否则主机重启一次、网络抖动一次，就把
+     * "改动文件"卡片在本进程内永久钉死成"这轮没有任何改动"
+     * （Mac `TurnChangesStore.load` 同样只在成功分支写缓存）。
+     */
+    fun load(address: TurnChangesAddress, fetch: suspend () -> TurnChangesSummary?) {
         if (summaries.containsKey(address) || address in unavailable || !loading.add(address)) return
         scope.launch {
             try {
-                val fetched = runCatching { api.changesSummary(address.sessionId, address.seq) }.getOrNull()
+                val fetched = runCatching { fetch() }.getOrElse { return@launch }
                 if (fetched != null) summaries[address] = fetched else unavailable.add(address)
             } finally {
                 loading.remove(address)
@@ -69,11 +81,20 @@ class TurnChangesStore(private val scope: CoroutineScope) {
 
     /** 读一次某个列出的文件的比较（没读过才读）。 */
     fun loadDiff(address: TurnChangesAddress, index: Int, api: ApiClient) {
+        loadDiff(address, index) { api.changesDiff(address.sessionId, address.seq, index) }
+    }
+
+    /**
+     * 拉取实现的可测入口；生产路径见上面的 [loadDiff]。
+     *
+     * 与 [load] 同一条规矩：传输失败不写缓存，只有 404 才记 unavailable。
+     */
+    fun loadDiff(address: TurnChangesAddress, index: Int, fetch: suspend () -> ChangedFileDiff?) {
         val key = DiffAddress(address, index)
         if (diffs.containsKey(key) || key in unavailableDiffs || !loadingDiffs.add(key)) return
         scope.launch {
             try {
-                val fetched = runCatching { api.changesDiff(address.sessionId, address.seq, index) }.getOrNull()
+                val fetched = runCatching { fetch() }.getOrElse { return@launch }
                 if (fetched != null) diffs[key] = fetched else unavailableDiffs.add(key)
             } finally {
                 loadingDiffs.remove(key)

@@ -38,7 +38,13 @@ fun formatDuration(ms: Double): String {
  * 与 Mac formatStatsDuration 同口径。
  */
 fun formatStatsDuration(ms: Double): String {
-    val seconds = max(0.0, ms) / 1000
+    // 非有限读数过不了下面 `< 60` 的判断，会一路落到分钟分支的 `roundToLong()` 上——
+    // Kotlin 的 roundToLong 对 NaN/无穷直接抛 IllegalArgumentException（不是"显示得不对"，
+    // 是把整块 UI 带崩）。时长来自主机投影（`llmMs`/`toolMs`/`ttftMs`），而 wire 上
+    // `"NaN"` 或 `"1e400"` 这类字符串会原样解析成 NaN/Infinity，所以这道闸是必须的。
+    // Mac 在同一位置显式挡了一道（SessionStatsReadings.formatStatsDuration）。
+    if (!ms.isFinite()) return fmt(Strings.durationSecondsText, "0")
+    val seconds = nonNegative(ms) / 1000
     if (seconds < 60) {
         val tenths = (seconds * 10).roundToLong()
         val text = if (tenths % 10 == 0L) "${tenths / 10}" else "${tenths / 10}.${tenths % 10}"
@@ -49,16 +55,24 @@ fun formatStatsDuration(ms: Double): String {
 }
 
 fun formatLatencySeconds(ms: Double): String {
-    val s = max(0.0, ms) / 1000
+    val s = nonNegative(ms) / 1000
     return if (s < 10) String.format(FIXED_LOCALE, "%.1f", (s * 10).roundToInt() / 10.0)
     else String.format(FIXED_LOCALE, "%.0f", s)
 }
 
 fun formatTokensPerSecond(tps: Double): String {
-    val clamped = max(0.0, tps)
+    val clamped = nonNegative(tps)
     return if (clamped >= 10) String.format(FIXED_LOCALE, "%.0f", clamped)
     else String.format(FIXED_LOCALE, "%.1f", (clamped * 10).roundToInt() / 10.0)
 }
+
+/**
+ * 非负夹取，NaN 读作 0——等价于 Mac 的 `max(0, x)`（Swift 的 `max` 用 `>=` 比较，
+ * `NaN >= 0` 为假，于是返回 0），而 Kotlin 的 `max(0.0, x)` 会把 NaN 原样带下去，
+ * 之后任何一次 `roundToInt/roundToLong` 都是一次崩溃。次秒级/速率读数都从 wire 来，
+ * 所以这条口径必须是 NaN 安全的。
+ */
+private fun nonNegative(value: Double): Double = if (value.isNaN()) 0.0 else max(0.0, value)
 
 fun turnTotalTokens(usage: TokenUsage): Int {
     val uncached = usage.uncachedInputTokens ?: usage.inputTokens ?: 0

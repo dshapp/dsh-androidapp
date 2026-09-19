@@ -315,6 +315,12 @@ object Strings {
         pick("Shown while a task is running.", "任务运行期间常驻，避免系统冻结后台连接。")
 }
 
-/** t() 风格的格式化：把 %d/%s 占位符填上。 */
+/**
+ * t() 风格的格式化：把 %d/%s 占位符填上。
+ *
+ * 区域固定成 [java.util.Locale.ROOT]：本端界面语言只有中/英两种，占位符里的数字就该是
+ * ASCII。跟随设备区域会让阿拉伯语设备把 `%d` 渲染成阿拉伯数字（٢٠٢٥），与 Format.kt
+ * 里已固定区域的小数/千分位读数对不上，同一屏出现两种数字形状。
+ */
 fun fmt(template: String, vararg args: Any): String =
-    runCatching { String.format(template, *args) }.getOrDefault(template)
+    runCatching { String.format(java.util.Locale.ROOT, template, *args) }.getOrDefault(template)

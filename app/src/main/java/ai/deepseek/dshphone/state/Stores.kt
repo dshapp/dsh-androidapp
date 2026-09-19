@@ -291,20 +291,32 @@ class SessionListStore(private val prefs: SharedPreferences?) {
         return known + fresh
     }
 
+    /**
+     * `orderBy: "status"`：按"最需要我"的档位分档，档内再按最近活动。
+     *
+     * 档位规则本身在 [sessionStatusRank]（纯函数，与 Mac `SessionStatusOrder.rank` 同序）。
+     * 之前这里是内联的 when，把"等我批准"和"等我回答"挤进同一档：两者同时挂着时，
+     * 等回答的会话会凭 updatedAt 排到等批准的前面，用户无从判断先看哪个。
+     */
     fun statusOrder(visible: List<SessionSummary>, erroredIds: Set<SessionId>): List<SessionSummary> =
-        visible.sortedWith(
-            compareBy<SessionSummary> { summary ->
-                val id = summary.sessionId
-                when {
-                    summary.running -> 0
-                    erroredIds.contains(id) -> 1
-                    completedSessionIds.contains(id) -> 2
-                    awaitingUserSessionIds.contains(id) -> 3
-                    draftSessionIds.contains(id) -> 4
-                    else -> 5
-                }
-            }.thenByDescending { it.updatedAt }
-        )
+        visible
+            .map { summary ->
+                summary to sessionStatusRank(
+                    isRunning = summary.running,
+                    isUnread = completedSessionIds.contains(summary.sessionId),
+                    didFail = erroredIds.contains(summary.sessionId),
+                    // 集合是"是否停在这"的权威，kind 表只负责命名：没有名字的标记
+                    // 仍按批准排档，与行上徽标的兜底同一口径。
+                    awaiting = if (awaitingUserSessionIds.contains(summary.sessionId)) {
+                        awaitingUserKinds[summary.sessionId] ?: SessionAwaitingKind.APPROVAL
+                    } else {
+                        null
+                    },
+                    hasDraft = draftSessionIds.contains(summary.sessionId),
+                )
+            }
+            .sortedWith(compareBy<Pair<SessionSummary, SessionStatusRank>> { it.second.key }.thenByDescending { it.first.updatedAt })
+            .map { it.first }
 
     fun reorderWithinSubset(moving: SessionId, before: SessionId?, within: List<SessionSummary>) {
         val subsetIds = within.map { it.sessionId }.toMutableList()

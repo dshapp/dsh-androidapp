@@ -34,15 +34,34 @@ object FileLink {
     /** Windows 盘符（`C:\\dir`、`C:/dir`）形状上也是 scheme，单独放行。 */
     private val windowsDrive = Regex("^[A-Za-z]:[\\\\/]")
 
+    /** Web `parseFileLink` 认的行号片段：`#L24` 或 `#L24-L30`（L 大写，两端都是正整数）。 */
+    private val lineFragment = Regex("^L([1-9][0-9]*)(?:-L([1-9][0-9]*))?$")
+
+    /** 片段是不是一行合法的行号锚点（区间不能倒着写，与 Web 的 `end < line` 判定一致）。 */
+    private fun isLineFragment(fragment: String): Boolean {
+        val match = lineFragment.matchEntire(fragment) ?: return false
+        val start = match.groupValues[1].toLongOrNull() ?: return false
+        val end = match.groupValues[2].takeIf { it.isNotEmpty() }?.toLongOrNull() ?: start
+        return end >= start
+    }
+
     /**
      * 解析一个 Markdown 链接目的地。
+     *
+     * 地址里的 `#…` 是行号锚点而不是路径的一部分——系统提示要求模型把文件提及写成
+     * `路径#L24` / `路径#L24-L30`（见 host 的 FILE_REFERENCE_PROMPT），Web 的
+     * `parseFileLink` 也是先切 `#` 再解析。不切就会拿着 `Foo.kt#L24` 去
+     * `workspaceFiles/read`，主机只会回 workspace-file/not-found。
+     * `?` 之后是查询串，同样不属于路径（Web 直接判它不是文件）。
      *
      * @param destination 作者原样写的地址（`dsh-resource://…`、`file://…`、绝对或相对路径）。
      * @returns 要读的文件，或者 null——空串、页内锚点、以及 http/https/mailto 等外部地址。
      */
     fun parse(destination: String): FileLinkTarget? {
-        val raw = destination.trim()
-        if (raw.isEmpty() || raw.startsWith("#")) return null
+        val trimmed = destination.trim()
+        if (trimmed.isEmpty()) return null
+        val raw = fileAddress(trimmed) ?: return null
+        if (raw.isEmpty()) return null
 
         if (raw.startsWith(RESOURCE_PREFIX, ignoreCase = true)) {
             return parseResource(raw.substring(RESOURCE_PREFIX.length))
@@ -82,20 +101,38 @@ object FileLink {
     fun parseInlineCode(value: String): FileLinkTarget? {
         val token = value.trim()
         if (token.isEmpty() || token.any { it.isWhitespace() }) return null
-        if (token.startsWith("dsh-resource://file/", ignoreCase = true) ||
-            token.startsWith(FILE_SCHEME, ignoreCase = true)
+        // 行号锚点（`…Foo.kt#L24`）不算路径，判形状前先切掉。
+        val address = fileAddress(token) ?: return null
+        if (address.startsWith("dsh-resource://file/", ignoreCase = true) ||
+            address.startsWith(FILE_SCHEME, ignoreCase = true)
         ) {
             return parse(token)
         }
-        if (token.startsWith("//") || token.startsWith("#")) return null
-        if (token.startsWith("/")) return parse(token)
-        if (!token.contains('/')) return null
-        val name = token.substringAfterLast('/')
+        if (address.startsWith("//") || address.isEmpty()) return null
+        if (address.startsWith("/")) return parse(token)
+        if (!address.contains('/')) return null
+        val name = address.substringAfterLast('/')
         val dot = name.lastIndexOf('.')
         if (dot <= 0 || dot == name.length - 1) return null
         val extension = name.substring(dot + 1)
         if (extension.length > 8 || !extension.all { it.isLetterOrDigit() }) return null
         return parse(token)
+    }
+
+    /**
+     * 去掉行号锚点与查询串，留下真正要读的地址。
+     *
+     * `#` 之后只认行号（`L24`、`L24-L30`）：别的片段说明这条链接不是文件链接
+     * （Web `parseFileLink` 同样返回 undefined），返回 null 让调用方退回普通链接；
+     * 含 `?` 的地址是查询串，同样不当作路径。每段都百分号编码过，所以文件名里的
+     * `#`/`?` 是 `%23`/`%3F`，不会被这里误切。
+     */
+    private fun fileAddress(trimmed: String): String? {
+        val hash = trimmed.indexOf('#')
+        val address = if (hash < 0) trimmed else trimmed.substring(0, hash)
+        if (hash >= 0 && !isLineFragment(trimmed.substring(hash + 1))) return null
+        if (address.contains('?')) return null
+        return address
     }
 
     /**

@@ -48,6 +48,28 @@ class FileLinkTest {
     }
 
     @Test
+    fun lineAnchors() {
+        // 系统提示要求模型把文件提及写成 `路径#L24` / `路径#L24-L30`（见 host 的
+        // FILE_REFERENCE_PROMPT）。锚点是行定位，不是路径的一部分：Web 的
+        // parseFileLink 先切掉 `#` 之后的部分再解析，手机端也不能拿着
+        // "Foo.kt#L24" 去 workspaceFiles/read，否则必然 workspace-file/not-found。
+        assertEquals("src/main/Foo.kt", path("src/main/Foo.kt#L24"))
+        assertEquals("src/main/Foo.kt", path("src/main/Foo.kt#L24-L30"))
+        assertEquals("/etc/hosts", path("/etc/hosts#L1"))
+        assertEquals("src/a.ts", path("dsh-resource://file/session/s/src/a.ts#L24"))
+        assertEquals("/w/a.txt", path("file:///w/a.txt#L3"))
+        assertEquals("src/main/Foo.kt", FileLink.parseInlineCode("src/main/Foo.kt#L24")?.path)
+        // 不是行号锚点的片段：整条链接不算文件（Web parseFileLink 同样返回 undefined），
+        // 否则 "a.md#section" 会被当成一个不存在的路径去读。
+        assertNull(path("docs/a.md#section"))
+        assertNull(path("docs/a.md#"))
+        assertNull(path("docs/a.md#L0"))
+        assertNull(path("docs/a.md#L9-L2"))
+        // 查询串同理：地址不是文件路径。
+        assertNull(path("docs/a.md?plain=1"))
+    }
+
+    @Test
     fun fileUrls() {
         assertEquals("/Users/me/a.txt", path("file:///Users/me/a.txt"))
         assertEquals("/Users/me/a.txt", path("file://host/Users/me/a.txt"))

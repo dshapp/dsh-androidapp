@@ -2,6 +2,7 @@ package ai.deepseek.dshphone.state
 
 import ai.deepseek.dshphone.model.SessionAwaitingKind
 import ai.deepseek.dshphone.model.SessionProjectionsBlock
+import ai.deepseek.dshphone.model.isSubagentOrigin
 import ai.deepseek.dshphone.model.SessionSummary
 import ai.deepseek.dshphone.model.WorkspaceView
 import ai.deepseek.dshphone.net.SessionId
@@ -27,6 +28,7 @@ class SessionListStore(private val prefs: SharedPreferences?) {
         private set(value) {
             sessionsState = value
             projectionSeqCache = null
+            runningSubagentRootsCache = null
         }
     var archivedSessionIds by mutableStateOf<List<SessionId>>(emptyList())
     var selectedSessionId: SessionId? = null
@@ -63,6 +65,45 @@ class SessionListStore(private val prefs: SharedPreferences?) {
      * `sessions` 一变就重建，所以它永远不会比列表本身更"新"。
      */
     private var projectionSeqCache: MutableMap<SessionId, MutableMap<String, Int>>? = null
+
+    /** [runningSubagentRoots] 的缓存；sessions 一变就作废（与 Mac 同一处失效点）。 */
+    private var runningSubagentRootsCache: Set<SessionId>? = null
+
+    /**
+     * 正在跑的子智能体所牵连到的祖先会话。
+     *
+     * 子智能体只在父会话的子智能体面板里存在、也不进顶层列表，所以一条「父会话自己早已停下、
+     * 派出去的子智能体还在跑」的行，光看 summary.running 会被当成空闲——状态排序于是把它排到
+     * 一堆无关会话后面，而它其实正是最需要用户回来看的那条。Mac 为此维护 runningSubagentRoots
+     * （Stores.swift 的 computeRunningSubagentRoots），并且只在 origin == "subagent" 这条边上
+     * 往父走（与子智能体面板的 stop-at-fork 规则一致）。
+     *
+     * 从整份名单算，不是从传进 [statusOrder] 的可见子集算：子智能体行本身不在可见子集里。
+     */
+    val runningSubagentRoots: Set<SessionId>
+        get() = runningSubagentRootsCache ?: computeRunningSubagentRoots().also { runningSubagentRootsCache = it }
+
+    /** 子 → 父一次，每个在跑的子智能体都把它的祖先链标上；父环靠 seen 集合兜底。 */
+    private fun computeRunningSubagentRoots(): Set<SessionId> {
+        val parentOf = mutableMapOf<SessionId, SessionId>()
+        for (summary in sessions) {
+            val parent = if (summary.isSubagentOrigin) summary.parentSessionId else null
+            if (parent != null) parentOf[summary.sessionId] = parent
+        }
+        val roots = mutableSetOf<SessionId>()
+        for (summary in sessions) {
+            if (!summary.running || !summary.isSubagentOrigin) continue
+            var current = summary.sessionId
+            val seen = mutableSetOf(current)
+            while (true) {
+                val parent = parentOf[current] ?: break
+                if (!seen.add(parent)) break
+                roots.add(parent)
+                current = parent
+            }
+        }
+        return roots
+    }
     private val projectionSeqBySession: MutableMap<SessionId, MutableMap<String, Int>>
         get() = projectionSeqCache ?: buildProjectionSeqs().also { projectionSeqCache = it }
 
@@ -302,7 +343,7 @@ class SessionListStore(private val prefs: SharedPreferences?) {
         visible
             .map { summary ->
                 summary to sessionStatusRank(
-                    isRunning = summary.running,
+                    isRunning = summary.running || runningSubagentRoots.contains(summary.sessionId),
                     isUnread = completedSessionIds.contains(summary.sessionId),
                     didFail = erroredIds.contains(summary.sessionId),
                     // 集合是"是否停在这"的权威，kind 表只负责命名：没有名字的标记

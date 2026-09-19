@@ -2,6 +2,7 @@ package ai.deepseek.dshphone
 
 import ai.deepseek.dshphone.model.SessionAwaitingKind
 import ai.deepseek.dshphone.model.SessionSummary
+import ai.deepseek.dshphone.model.isSubagentOrigin
 import ai.deepseek.dshphone.state.SessionListStore
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -92,4 +93,30 @@ class StatusOrderRankTest {
             s.statusOrder(s.sessions, setOf("failed")).map { it.sessionId },
         )
     }
+
+    @Test
+    fun aRunningSubagentMarksItsParentAsRunning() {
+        val s = SessionListStore(null)
+        // 父会话本身早已停下；它派出去的子智能体还在跑。
+        s.upsert(summary("parent", 1.0))
+        s.upsert(
+            SessionSummary(
+                sessionId = "child",
+                updatedAt = 99.0,
+                running = true,
+                parentSessionId = "parent",
+                origin = "subagent",
+            )
+        )
+        // 一条纯空闲会话，作为对照。
+        s.upsert(summary("idle", 50.0))
+        // 真实调用点传的是顶层会话（子智能体行不进列表），这里照做。
+        val listed = s.sessions.filter { !it.isSubagentOrigin }
+        assertEquals(
+            "子智能体还在跑，父会话就该按'正在跑'排在最前（Mac 的 runningSubagentRoots）",
+            listOf("parent", "idle"),
+            s.statusOrder(listed, emptySet()).map { it.sessionId },
+        )
+    }
 }
+

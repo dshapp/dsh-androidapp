@@ -83,6 +83,23 @@ private fun toAnyValue(value: JsonElement): Any? = when (value) {
     is JsonObject -> value.mapValues { toAnyValue(it.value) }
 }
 
+/**
+ * 读取一个"对象数组"字段，元素级校验类型。
+ *
+ * 不能写成 `value as? List<Map<String, Any?>>`：泛型擦除后只剩 `List`，元素是 String
+ * 时转换照样"成功"，直到取键时才抛 ClassCastException（本函数在组合期执行，等于崩溃）。
+ * 元素类型不对就整体返回 null，与 Mac `as? [[String: Any]]` 一致，由调用方回退到通用摘要。
+ */
+@Suppress("UNCHECKED_CAST")
+private fun objectList(value: Any?): List<Map<String, Any?>>? {
+    val list = value as? List<*> ?: return null
+    val out = ArrayList<Map<String, Any?>>(list.size)
+    for (item in list) {
+        out.add(item as? Map<String, Any?> ?: return null)
+    }
+    return out
+}
+
 private fun pickString(args: Map<String, Any?>, keys: List<String>): String? {
     for (key in keys) {
         val value = args[key] as? String
@@ -181,8 +198,7 @@ fun toolRowModel(data: ToolChatData, cwd: String?): ToolRowModel {
 /** todo 行的摘要：完成数 + 当前进行项；后缀是并行数，不能被截断。 */
 fun todoSummary(argsRaw: String): Pair<String, String?>? {
     val args = parseArgsMap(argsRaw) ?: return null
-    @Suppress("UNCHECKED_CAST")
-    val todos = args["todos"] as? List<Map<String, Any?>> ?: return null
+    val todos = objectList(args["todos"]) ?: return null
     val active = todos.filter { it["status"] == "in_progress" }
     val done = todos.count { it["status"] == "completed" }
     val head = fmt(Strings.todoCompleted, done, todos.size)
@@ -201,8 +217,7 @@ fun askSummary(data: ToolChatData): String? {
     if (result.isError) return null
     val text = result.content.filterIsInstance<ContentBlock.Text>().joinToString("") { it.text }
     val obj = parseArgsMap(text) ?: return null
-    @Suppress("UNCHECKED_CAST")
-    val answers = obj["answers"] as? List<Map<String, Any?>> ?: return null
+    val answers = objectList(obj["answers"]) ?: return null
     val answered = answers.count { answer ->
         ((answer["selected"] as? List<*>)?.isNotEmpty() == true) ||
             ((answer["custom"] as? String)?.isNotEmpty() == true)

@@ -34,6 +34,11 @@ object FileLink {
     /** Windows 盘符（`C:\\dir`、`C:/dir`）形状上也是 scheme，单独放行。 */
     private val windowsDrive = Regex("^[A-Za-z]:[\\\\/]")
 
+    /** 单独一个盘符段（`C:`），Web `isDriveSegment` 同形：只看首段是不是"字母+冒号"。 */
+    private val driveSegment = Regex("^[A-Za-z]:$")
+
+    private fun isDriveSegment(segment: String): Boolean = driveSegment.matches(segment)
+
     /** Web `parseFileLink` 认的行号片段：`#L24` 或 `#L24-L30`（L 大写，两端都是正整数）。 */
     private val lineFragment = Regex("^L([1-9][0-9]*)(?:-L([1-9][0-9]*))?$")
 
@@ -156,7 +161,20 @@ object FileLink {
                 if (sessionId.isEmpty() || path.isEmpty()) null else FileLinkTarget(path, sessionId)
             }
             // absolute 作用域把自己的分隔斜杠当作根：地址里省略了路径开头的 "/"。
-            "absolute" -> decode(tail).takeIf { it.isNotEmpty() }?.let { FileLinkTarget("/" + it) }
+            // 与 Web parseFileAddress 的 absolute 分支同构：先分段再逐段解码，
+            // 双斜杠开头是 UNC（拼回 "//host/share/…"），首段是 Windows 盘符时不再补
+            // 前导 "/"——"/C:/work/x.ts" 交给主机只会 workspace-file/not-found。
+            "absolute" -> {
+                val segments = tail.split('/')
+                val unc = segments.firstOrNull() == "" && segments.size > 1
+                val parts = (if (unc) segments.drop(1) else segments).map { decode(it) }
+                when {
+                    parts.isEmpty() || parts.first().isEmpty() -> null
+                    unc -> FileLinkTarget("//" + parts.joinToString("/"))
+                    isDriveSegment(parts.first()) -> FileLinkTarget(parts.joinToString("/"))
+                    else -> FileLinkTarget("/" + parts.joinToString("/"))
+                }
+            }
             else -> null
         }
     }

@@ -28,6 +28,12 @@ class FileLinkTest {
         // absolute 作用域不带会话：路径本身就是绝对的。
         assertEquals("/home/me/notes.md", path("dsh-resource://file/absolute/home/me/notes.md"))
         assertNull(session("dsh-resource://file/absolute/home/me/notes.md"))
+        // 盘符段不能再补一个前导斜杠：Web parseFileAddress 先用 isDriveSegment 判首段，
+        // "/C:/work/x.ts" 交给主机只会 workspace-file/not-found。
+        assertEquals("C:/work/x.ts", path("dsh-resource://file/absolute/C:/work/x.ts"))
+        // 开头多出的空段是 UNC，Web 同样拼回双斜杠。
+        assertEquals("//C:/work/x.ts", path("dsh-resource://file/absolute//C:/work/x.ts"))
+        assertEquals("//server/share/a.txt", path("dsh-resource://file/absolute//server/share/a.txt"))
         // 别的资源类型（terminal）不是文件。
         assertNull(path("dsh-resource://terminal/session/s/1"))
         // 没有路径段 / 没有会话段的地址解析不出文件。

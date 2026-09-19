@@ -135,6 +135,29 @@ private fun readFrame(input: DataInputStream): ByteArray {
     return body
 }
 
+/**
+ * 读下一帧，只在**帧边界**上的干净 EOF 返回 null。
+ *
+ * 与 [readFrame] 的区别只在 EOF 语义：握手阶段的 readFrame 短读就该抛，
+ * 而这里的调用方是流式读取，必须把"对端优雅关闭"和"传输被打断"分开——
+ * 帧读到一半的截断、读超时、连接重置都是 IOException，不能当成正常结束。
+ */
+internal fun readFrameAtBoundary(input: DataInputStream): ByteArray? {
+    // 长度前缀的第一个字节单独读：read() 返回 -1 才是"干干净净地就在帧边界上结束了"。
+    // 不能用 readUnsignedShort()——它在 0 字节和 1 字节两种情况下都抛 EOFException，
+    // 分不出干净关闭和截断。
+    val first = input.read()
+    if (first < 0) return null
+    val second = input.read()
+    if (second < 0) throw java.io.EOFException("noise: truncated frame length")
+    val length = (first shl 8) or second
+    val body = ByteArray(length)
+    // 正文短读会抛 EOFException；读超时/连接重置会抛各自的 IOException。
+    // 这些都不是正常结束，原样向上抛，让调用方走失败路径。
+    input.readFully(body)
+    return body
+}
+
 /** 解密后的下行明文。 */
 private class NoiseInputStream(
     private val raw: DataInputStream,
@@ -152,11 +175,7 @@ private class NoiseInputStream(
     override fun read(destination: ByteArray, start: Int, length: Int): Int {
         if (length == 0) return 0
         while (offset >= buffer.size) {
-            val sealed = try {
-                readFrame(raw)
-            } catch (e: IOException) {
-                return -1
-            }
+            val sealed = readFrameAtBoundary(raw) ?: return -1
             buffer = try {
                 transport.decrypt(sealed)
             } catch (e: Exception) {

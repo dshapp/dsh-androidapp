@@ -55,6 +55,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private const val PAGE_SIZE = 60
@@ -119,8 +120,64 @@ fun SessionListScreen(
     // - origin == "subagent" 的会话是某个会话派生出来的子智能体，它只在父会话的
     //   子智能体面板里露面，列成顶层会话会把一次委派炸成一堆看不懂的条目。
     //   注意只挡 subagent 这一种来源：普通 fork 出来的会话仍是独立会话，照常列出。
-    val listed = model.listStore.sessions.filter { !it.blank && !it.isSubagentOrigin }
+    // 名单只在会话清单变化时重建。原来每次重组都新建一个 List，下游以它为 key 的 remember
+    // 全部失效——输入一个字就要把 1500 多条会话重新筛一遍、再分组排序一遍。
+    val listed = remember(model.listStore.sessions) {
+        model.listStore.sessions.filter { !it.blank && !it.isSubagentOrigin }
+    }
     val erroredIds = model.sessions.filterValues { it.unreadError }.keys
+
+    // 搜索命中在进入列表前先算好：列表主体与浮层空状态读同一份结果，两处各算一次迟早会漂移。
+    //
+    // 主机的内容搜索是可选能力（`openAt: never` 的部署直接拒绝 `session/search`），
+    // 所以命中有两个来源、合并后才完整：已经在列表里的标题/工作区名本地匹配，加上主机
+    // 返回的内容命中。与 web `deriveSearchResults`、Mac 边栏同一口径。
+    //
+    // 只在查询或名单变化时重算，两张查找表都提到循环外各取一次：`workspaceTitleBySession`
+    // 与 `sessionsById` 是每次访问都重建整张表的计算属性，放进逐会话循环里会退化成 O(n²)，
+    // 那正是搜索卡顿的来源。标题匹配只看清单里的投影标题（与 Mac 本地臂一致），不去读每个
+    // 会话的实时状态，免得为 1500 个会话登记一遍快照订阅。
+    val normalizedSearchQuery = query.trim()
+    val remoteHitsForQuery =
+        if (model.searchQuery == normalizedSearchQuery) model.searchHits.orEmpty() else emptyList()
+    val searchRows: SessionSearchRows = remember(
+        searching, normalizedSearchQuery, listed, remoteHitsForQuery,
+        model.workspaceStore.workspaces,
+    ) {
+        if (!searching) {
+            SessionSearchRows()
+        } else {
+            val workspaceTitles = model.workspaceStore.workspaceTitleBySession
+            val localMatches = listed
+                .filter { summary ->
+                    sessionMatchesSearch(
+                        sessionSearchName(summary, liveTitle = null),
+                        sessionWorkspaceName(workspaceTitles[summary.sessionId], summary.cwd),
+                        normalizedSearchQuery,
+                    )
+                }
+                .sortedByDescending { it.updatedAt }
+            val byId =
+                if (remoteHitsForQuery.isEmpty()) emptyMap<SessionId, SessionSummary>()
+                else listed.associateBy { it.sessionId }
+            mergeSessionSearchResults(localMatches, remoteHitsForQuery, byId)
+        }
+    }
+    // 不可用只认「当前这次查询」的结论；上一次查询的失败不该贴到新的查询上。
+    val searchContentUnavailable = searching &&
+        model.searchQuery == normalizedSearchQuery &&
+        model.searchContentUnavailable
+
+    // 输入不逐字打主机：停顿一下才发一次 `session/search`。手机上一次往返就带来一次重组，
+    // 防抖比 web 的「每字一次 + abort 旧的」更划算；本地标题命中不受影响，随输入即时更新。
+    LaunchedEffect(normalizedSearchQuery) {
+        if (normalizedSearchQuery.isEmpty()) {
+            model.search("")
+        } else {
+            delay(250)
+            model.search(normalizedSearchQuery)
+        }
+    }
 
     fun ordered(items: List<SessionSummary>): List<SessionSummary> = when (orderBy) {
         "manual" -> model.listStore.manualOrder(items)
@@ -128,8 +185,12 @@ fun SessionListScreen(
         else -> items.sortedByDescending { it.updatedAt }
     }
 
-    val groups: List<SessionGroup> = remember(listed, groupBy, orderBy, model.workspaceStore.workspaces,
-        model.listStore.pinnedSessionOrder, erroredIds) {
+    // 搜索态渲染的是命中列表，这份分组一行都用不上；不跳过的话，每个字都要把整份名单
+    // 重新分组、排序一遍，白烧一帧。
+    val groups: List<SessionGroup> = if (searching) emptyList() else remember(
+        listed, groupBy, orderBy, model.workspaceStore.workspaces,
+        model.listStore.pinnedSessionOrder, erroredIds,
+    ) {
         val result = mutableListOf<SessionGroup>()
         val pinnedIds = model.listStore.pinnedSessionIds
         val pinned = model.listStore.pinnedOrder(listed)
@@ -211,7 +272,7 @@ fun SessionListScreen(
                             }
                             BasicTextField(
                                 value = query,
-                                onValueChange = { query = it; model.search(it) },
+                                onValueChange = { query = it },
                                 singleLine = true,
                                 textStyle = MaterialTheme.typography.bodyLarge.copy(
                                     color = MaterialTheme.colorScheme.onSurface,
@@ -305,18 +366,23 @@ fun SessionListScreen(
             ) {
                 LazyColumn(Modifier.fillMaxSize(), state = listState) {
                     if (searching) {
-                        val byId = model.listStore.sessionsById
-                        // 搜索结果同样挡掉子智能体（Mac 边栏搜索的 sessionVisible 口径）：
-                        // 主机的命中里会混进子会话，点进去只会是一段没有上下文的委派转写。
-                        val hits = (model.searchHits ?: emptyList())
-                            .mapNotNull { byId[it.sessionId] }
-                            .filterNot { it.isSubagentOrigin }
+                        val hits = searchRows.sessions
                         item { SectionHeader("${Strings.searchResults} (${hits.size})", null, false) {} }
                         items(hits, key = { it.sessionId }) { summary ->
                             SessionRow(
                                 model, summary, onOpenSession,
                                 onRename = { renameText = titleOf(model, summary); renaming = summary },
                             )
+                        }
+                        // 内容搜索被主机关掉时，结果只剩本地名称匹配；明说一句，
+                        // 免得用户以为「搜不到内容」就是「这条会话不存在」。
+                        if (searchContentUnavailable) {
+                            item(key = "search-unavailable") { SearchNotice(Strings.searchUnavailable) }
+                        }
+                        if (searchRows.hasMore) {
+                            item(key = "search-has-more") {
+                                SearchNotice(fmt(Strings.searchHasMore, SESSION_SEARCH_RESULT_LIMIT))
+                            }
                         }
                     } else {
                         groups.forEach { group ->
@@ -350,7 +416,7 @@ fun SessionListScreen(
                         }
                     }
                 }
-                Box(Modifier.fillMaxSize()) { StatusOverlay(model, searching, query) }
+                Box(Modifier.fillMaxSize()) { StatusOverlay(model, searching, query, searchRows.sessions.isEmpty()) }
             }
         }
     }
@@ -790,8 +856,31 @@ private fun Badge(text: String) {
     )
 }
 
+/**
+ * 搜索列表底部的一条说明（内容搜索不可用 / 结果被截断）。
+ *
+ * 与结果行同为 `LazyColumn` 的一项：它随主机答复在「有/无」之间切换，放进列表才会
+ * 跟着一起增删，不会把上面的结果行顶得跳一下。
+ */
 @Composable
-private fun BoxScope.StatusOverlay(model: PhoneModel, searching: Boolean, query: String) {
+private fun SearchNotice(text: String) {
+    Text(
+        text,
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.outline,
+    )
+}
+
+@Composable
+private fun BoxScope.StatusOverlay(
+    model: PhoneModel,
+    searching: Boolean,
+    query: String,
+    searchEmpty: Boolean,
+) {
     val connection = model.connection
     when {
         connection is Connection.Failed -> ToastNotice(
@@ -799,7 +888,8 @@ private fun BoxScope.StatusOverlay(model: PhoneModel, searching: Boolean, query:
         )
         connection is Connection.Connecting && model.listStore.sessions.isEmpty() ->
             CircularProgressIndicator(Modifier.align(Alignment.Center))
-        searching && model.searchHits?.isEmpty() == true ->
+        // 空状态认合并后的命中：本地名称匹配也算结果，只有两边都没有才算「没搜到」。
+        searching && searchEmpty ->
             EmptyState(Icons.Default.SearchOff, Strings.searchNoResults, query)
         !searching && model.listStore.sessions.isEmpty() && connection is Connection.Connected ->
             EmptyState(Icons.AutoMirrored.Filled.Chat, Strings.noSessions, null)

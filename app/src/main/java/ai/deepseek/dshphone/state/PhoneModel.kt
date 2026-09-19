@@ -126,6 +126,19 @@ class PhoneModel private constructor(app: Application) {
         private set
     var searchHits by mutableStateOf<List<SessionSearchItem>?>(null)
         private set
+    /** 当前这次搜索的查询串；结果与它一起发布，旧查询的晚到结果据此丢弃。 */
+    var searchQuery by mutableStateOf("")
+        private set
+    /**
+     * 主机内容搜索是否不可用（例如 `openAt: never` 的部署直接拒绝 `session/search`）。
+     *
+     * 与 web `currentRemote.status === 'error'` 同一口径：不可用不是「没有命中」，
+     * 结果里仍保留本地标题/工作区命中，界面另外给一条「内容搜索暂不可用」的提示。
+     */
+    var searchContentUnavailable by mutableStateOf(false)
+        private set
+    /** 搜索代次：每次输入自增，只有最新一次的结果能落库。 */
+    private var searchGeneration = 0
     /// 列表下拉刷新是否在飞行中。
     var refreshing by mutableStateOf(false)
         private set
@@ -692,15 +705,34 @@ class PhoneModel private constructor(app: Application) {
 
     // —— 会话管理 ——————————————————————————————————————————————
 
+    /**
+     * 运行一次会话搜索。
+     *
+     * 主机的 `session/search` 是可选的内容检索：部署把它关掉时（`openAt: never`）
+     * 每一次调用都以失败告终。失败不等于「没有命中」——调用方仍用本地标题/工作区
+     * 匹配兜底，并另给一条不可用提示，所以这里把「不可用」单独发布出来，而不是把
+     * 失败混进空结果里。
+     *
+     * 边打边搜会叠很多次请求，晚到的旧结果必须丢掉：用代次比对，只有最新一次能落库
+     * （对齐 web 每次查询新建 AbortController 的做法）。
+     */
     fun search(query: String) {
+        val trimmed = query.trim()
+        val generation = ++searchGeneration
+        if (api == null || trimmed.isEmpty()) {
+            searchHits = null
+            searchQuery = ""
+            searchContentUnavailable = false
+            return
+        }
         scope.launch {
-            val trimmed = query.trim()
             val client = api
-            if (client == null || trimmed.isEmpty()) {
-                searchHits = null
-                return@launch
-            }
-            searchHits = runCatching { client.sessionSearch(trimmed).items }.getOrNull()
+            if (generation != searchGeneration) return@launch
+            val result = runCatching { client?.sessionSearch(trimmed)?.items }
+            if (generation != searchGeneration) return@launch
+            searchQuery = trimmed
+            searchHits = result.getOrNull()
+            searchContentUnavailable = result.isFailure
         }
     }
 

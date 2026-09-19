@@ -113,6 +113,11 @@ object Strings {
     val goalClear: String get() = pick("Clear goal", "清除目标")
     val goalEdit: String get() = pick("Edit goal", "编辑目标")
     val findInChat: String get() = pick("Find in chat", "会话内查找")
+    /** 查找命中计数，如「2/7」（按命中行算）。标题栏留给输入框的宽度有限，用紧凑写法。 */
+    val findCount: String get() = pick("%d/%d", "%d/%d")
+    val findPrevious: String get() = pick("Previous match", "上一个匹配")
+    val findNext: String get() = pick("Next match", "下一个匹配")
+    val findNoResults: String get() = pick("No matches in this chat", "会话内未找到匹配")
     val copy: String get() = pick("Copy", "复制")
     val subagents: String get() = pick("Subagents", "子智能体")
     val deliverables: String get() = pick("Deliverables", "产物")
@@ -265,6 +270,12 @@ object Strings {
     /** 与 iOS approvalEscalation 同口径：工具 %s 请求越权执行。 */
     val approvalEscalation: String get() = pick("Tool %s requests privileged execution", "工具 %s 请求越权执行")
     val searchNoResults: String get() = pick("No matching sessions", "没有匹配的会话")
+    /** 内容搜索被主机关闭时与本地名称匹配结果一起展示（对齐 web search.unavailable）。 */
+    val searchUnavailable: String get() =
+        pick("Content search is unavailable. Showing name matches.", "内容搜索暂不可用，仅显示名称匹配。")
+    /** 结果被截断时的提示，%s 是结果上限。 */
+    val searchHasMore: String get() =
+        pick("Showing the first %s results. Narrow your search.", "仅显示前 %s 条结果，请缩小搜索范围。")
     val serverRemove: String get() = pick("Remove pairing", "移除配对")
     val serverRemoveMessage: String get() =
         pick("This only removes the pairing on this device.", "只会移除本机上的这条配对。")

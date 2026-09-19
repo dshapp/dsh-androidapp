@@ -103,6 +103,79 @@ fun sessionDisplayTitle(summary: SessionSummary, liveTitle: String?): String {
     return sessionDisplayTitle(summary)
 }
 
+/**
+ * 会话归属的工作区显示名：优先工作区标题，退回 cwd 的目录名；都没有就是 null。
+ *
+ * 与 Mac `sessionWorkspaceName` 同口径，也复用同一份路径取 basename 的规则——
+ * 会话标题与工作区名必须用同一种写法，否则搜索命中与列表行的灰色前缀会对不上。
+ */
+fun sessionWorkspaceName(workspaceTitle: String?, cwd: String?): String? {
+    workspaceTitle?.takeIf { it.isNotEmpty() }?.let { return it }
+    val base = cwd?.takeIf { it.isNotEmpty() }?.let { pathBasename(it) }.orEmpty()
+    return base.takeIf { it.isNotEmpty() }
+}
+
+/**
+ * 本地搜索用的会话名：实时标题 / 投影标题 / cwd 目录名；三者都没有就是空串。
+ *
+ * 刻意不退回 sessionId：那是 [sessionDisplayTitle] 给无标题会话的兜底显示值，
+ * 拿它参与子串匹配会让「session」这种常见词命中几乎每一条会话。
+ */
+fun sessionSearchName(summary: SessionSummary, liveTitle: String?): String {
+    if (!liveTitle.isNullOrEmpty()) return liveTitle
+    summary.projections?.values?.get("title").str?.takeIf { it.isNotEmpty() }?.let { return it }
+    return summary.cwd?.takeIf { it.isNotEmpty() }?.let { pathBasename(it) }.orEmpty()
+}
+
+/**
+ * 本地元数据是否命中查询：会话标题或工作区名包含查询串（大小写不敏感）。
+ *
+ * 主机的内容搜索是可选的（`openAt: never` 的部署直接拒绝 `session/search`），
+ * 而三端（web `deriveSearchResults` 本地臂 / Mac `resolved` / 本端）都保留一条
+ * 纯本地的兜底：拿已经在列表里的标题和工作区名做子串匹配。主机拒绝搜索时，
+ * 用户至少还能按名字找到会话，而不是任何查询都空。
+ */
+fun sessionMatchesSearch(title: String, workspaceName: String?, query: String): Boolean {
+    val needle = query.trim()
+    if (needle.isEmpty()) return false
+    return title.contains(needle, ignoreCase = true) ||
+        (workspaceName?.contains(needle, ignoreCase = true) == true)
+}
+
+/** 协议约定的搜索结果上限（web/Mac 的 `searchResultLimit` 都是 20）。 */
+const val SESSION_SEARCH_RESULT_LIMIT = 20
+
+/** 合并后的搜索结果：截断后的行，以及是否还有被截掉的命中。 */
+data class SessionSearchRows(
+    val sessions: List<SessionSummary> = emptyList(),
+    val hasMore: Boolean = false,
+)
+
+/**
+ * 合并「本地标题命中的会话」与「主机内容命中的结果」。
+ *
+ * 顺序与 web `deriveSearchResults` 一致：本地命中先出（[localMatches] 已按最近
+ * 活动排序），主机命中补齐其余、按 sessionId 去重。空白会话与 subagent 来源的
+ * 会话一律不进结果：前者是「新建会话」的占位，后者只在父会话的子智能体面板里存在。
+ * 与 web/Mac 一样截到 [limit]，多出来的用 [SessionSearchRows.hasMore] 告知调用方。
+ */
+fun mergeSessionSearchResults(
+    localMatches: List<SessionSummary>,
+    remoteHits: List<SessionSearchItem>,
+    byId: Map<SessionId, SessionSummary>,
+    limit: Int = SESSION_SEARCH_RESULT_LIMIT,
+): SessionSearchRows {
+    val ordered = mutableListOf<SessionSummary>()
+    val seen = mutableSetOf<SessionId>()
+    for (summary in localMatches) if (seen.add(summary.sessionId)) ordered.add(summary)
+    for (hit in remoteHits) {
+        val summary = byId[hit.sessionId] ?: continue
+        if (summary.blank || summary.isSubagentOrigin) continue
+        if (seen.add(summary.sessionId)) ordered.add(summary)
+    }
+    return SessionSearchRows(ordered.take(limit), ordered.size > limit)
+}
+
 // 列表行尾 ————————————————————————————————————————————————————
 
 enum class SessionAwaitingKind {

@@ -394,14 +394,44 @@ fun splitRecommended(raw: String): RecommendedOptionLabel {
 
 // 相对时间 ————————————————————————————————————————————————————
 
+/**
+ * 紧凑相对时间，六档桶与 Web `ui-primitives` 的 relativeTime / Mac relativeTimeLabel 同口径：
+ * now（<1 分钟）、minutes、hours、days、months（30 天起）、years（365 天起）。
+ *
+ * 口径必须两端一致：同一屏里两端对同一条会话的说法不能一个是"刚刚"一个是"0秒"，
+ * 也不能把一年前读成 "395天"。
+ */
 fun relativeTime(updatedAtMs: Double): String {
-    val delta = (System.currentTimeMillis() - updatedAtMs).toLong().coerceAtLeast(0L)
-    val seconds = delta / 1000
+    // 时钟漂移会让 updatedAt 落到未来；夹到 0 后走 now 档，不出现负数。
+    val diff = (System.currentTimeMillis() - updatedAtMs).coerceAtLeast(0.0)
+    val en = Strings.locale.name == "EN"
+    val minute = 60_000.0
+    val hour = 3_600_000.0
+    val day = 86_400_000.0
+    val month = 30 * day
+    val year = 365 * day
     return when {
-        seconds < 60 -> if (Strings.locale.name == "EN") "${seconds}s" else "${seconds}秒"
-        seconds < 3600 -> if (Strings.locale.name == "EN") "${seconds / 60}m" else "${seconds / 60}分钟"
-        seconds < 86_400 -> if (Strings.locale.name == "EN") "${seconds / 3600}h" else "${seconds / 3600}小时"
-        else -> if (Strings.locale.name == "EN") "${seconds / 86_400}d" else "${seconds / 86_400}天"
+        diff < minute -> if (en) "now" else "刚刚"
+        diff < hour -> {
+            val n = (diff / minute).toLong()
+            if (en) "${n}min" else "${n}分钟"
+        }
+        diff < day -> {
+            val n = (diff / hour).toLong()
+            if (en) "${n}h" else "${n}小时"
+        }
+        diff < month -> {
+            val n = (diff / day).toLong()
+            if (en) "${n}d" else "${n}天"
+        }
+        diff < year -> {
+            val n = (diff / month).toLong()
+            if (en) "${n}mo" else "${n}个月"
+        }
+        else -> {
+            val n = (diff / year).toLong()
+            if (en) "${n}y" else "${n}年"
+        }
     }
 }
 

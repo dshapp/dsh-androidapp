@@ -8,6 +8,7 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -49,6 +50,10 @@ data class PhoneSuggestion(
     val subtitle: String?,
     val icon: String,
     val insert: String,
+    /** 带参数的命令的用法提示（如 `[off|message]`），只用于显示，不参与插入。 */
+    val hint: String? = null,
+    /** 这条命令声明了 `input`：只有行首上下文才允许召唤（Mac `commandCandidates` 的 position 规则）。 */
+    val wantsArgs: Boolean = false,
 )
 
 /** 草稿末尾的触发 token。 */
@@ -101,6 +106,11 @@ class PhoneModel private constructor(app: Application) {
     val settings = SettingsStore(appContext)
 
     val listStore = SessionListStore(prefs)
+    /**
+     * 本机缓存。用来 stale-while-revalidate：先把上次的清单/窗口画出来，
+     * 远端基线回来整体替换。谁也没连接上时（profile 为空）静默不用。
+     */
+    private var cache: SessionCache? = null
     var workspaceStore by mutableStateOf(WorkspaceStore())
         private set
 
@@ -204,9 +214,16 @@ class PhoneModel private constructor(app: Application) {
             profiles.setCurrent(profile.id)
             val client = ApiClient(profile.target())
             api = client
+            // 先把这台主机上次的清单铺上：网络还没起来，列表已经有内容可画。
+            // 权威答案在随后的 refreshInternal，它整体替换这份底稿。
+            val sessionCache = SessionCache(appContext, profile.id)
+            cache = sessionCache
+            val cachedRoster = withContext(Dispatchers.IO) { sessionCache.loadRoster() }
+            listStore.seedFromCache(cachedRoster)
             val streamCoordinator = StreamCoordinator(
                 api = client,
                 scope = scope,
+                cache = sessionCache,
                 listStore = listStore,
                 workspaceStore = workspaceStore,
                 sessionLookup = { sessions[it] },
@@ -217,11 +234,12 @@ class PhoneModel private constructor(app: Application) {
                 sessionsArchivedHandler = { ids -> ids.forEach { handleSessionRemoved(it) } },
                 resyncHandler = { scope.launch { resyncAfterReconnect() } },
                 gapRepairLoader = { address, throughSeq ->
+                    // 补洞不是翻页：只补漏掉的那一小段，窗口大小照翻页口径给即可。
                     when (address) {
                         is SessionAddress.Session ->
-                            client.sessionHistory(address.sessionId, throughSeq, null, 50)
+                            client.sessionHistory(address.sessionId, throughSeq, null, HISTORY_MESSAGES)
                         is SessionAddress.Subagent ->
-                            client.subagentHistory(address.address, throughSeq, null, 50)
+                            client.subagentHistory(address.address, throughSeq, null, HISTORY_MESSAGES)
                     }
                 },
                 attentionHandler = { signal -> notifier?.invoke(signal) },
@@ -247,6 +265,10 @@ class PhoneModel private constructor(app: Application) {
             val value = client.sessionList()
             if (generation != sessionListRefreshGeneration) return
             listStore.endBaselinePull(value.items, token)
+            // 落盘的是合并后的清单（基线 + 往返期间重放的增量），比裸的 value.items
+            // 更接近用户此刻看到的那一份。
+            val snapshot = listStore.sessions
+            withContext(Dispatchers.IO) { cache?.saveRoster(snapshot) }
             connection = Connection.Connected
             markConnected?.let { profiles.markConnected(it) }
             // 基线里的 running 是权威答案：进程被回收后重开、或断线重连时，
@@ -256,7 +278,9 @@ class PhoneModel private constructor(app: Application) {
         } catch (e: Exception) {
             if (generation != sessionListRefreshGeneration) return
             listStore.discardBaselinePull(token)
-            connection = Connection.Failed(describe(e))
+            // 底层异常只写日志排查；界面上给的是"连不上"这条人话，见 ConnectionBanner。
+            Log.w(TAG, "session list refresh failed: ${rawDescription(e)}")
+            connection = Connection.Failed(Strings.offlineBannerTitle)
         }
     }
 
@@ -293,6 +317,8 @@ class PhoneModel private constructor(app: Application) {
     private fun handleSessionRemoved(sessionId: SessionId) {
         sessions.remove(sessionId)
         listStore.remove(sessionId)
+        // 会话在主机侧没了，缓存里的窗口跟着删，别让下一屏画出幽灵会话。
+        cache?.let { sessionCache -> scope.launch(Dispatchers.IO) { sessionCache.removeWindow(sessionId) } }
         if (selectedSessionId == sessionId) {
             selectedSessionId = null
             lastErrorMessage = Strings.sessionGone
@@ -317,6 +343,7 @@ class PhoneModel private constructor(app: Application) {
         connectedProfileId = null
         sessions.clear()
         selectedSessionId = null
+        cache = null
         workspaceStore = WorkspaceStore()
         connection = Connection.Idle
     }
@@ -360,13 +387,25 @@ class PhoneModel private constructor(app: Application) {
             listStore.selectedSessionId = sessionId
             listStore.clearCompleted(sessionId)
             val store = store(sessionId)
+            // 这条会话上次的窗口先铺上再 follow：点开就能看到内容，follow 的
+            // snapshot 回来整体替换。整段不阻塞，别的会话也能立刻打开。
+            launch {
+                // 读盘在 IO，铺底稿回主线程（Compose 状态只在主线程写）。
+                val cachedWindow = withContext(Dispatchers.IO) { cache?.loadWindow(sessionId) }
+                if (cachedWindow != null) store.seedFromCache(cachedWindow)
+            }
             // 先喂首页裁切点再 follow：store 是既有的那些不会走 seedFromSummary，
             // 少了这一步 historyCursor 会退化成 0（与 Mac 手机端 open 同一处动作）。
             listStore.sessionsById[sessionId]?.projections?.asOfSeq?.let { store.seedHistoryCursor(it) }
-            // 基线由 session/follow 的 snapshot 帧给出：它自带 records / hasMore / projections。
-            // 这里的分页只兜底"已经有实时事件、却还没有基线"的 store（通知唤起的那种）；
-            // 完全空白的新 store 没有游标，loadHistory 会直接跳过，转写保持加载态等 snapshot。
-            coordinator?.follow(sessionId)
+            // 首屏只拉一份：基线由 session/follow 的 snapshot 帧给出（自带 records / hasMore /
+            // projections），凡是 follow 能覆盖的 store 都不要再发 session/page——过去这里两条
+            // 都发，同一段历史在首屏被拉了两遍，正是点开会话要等很久的大头。
+            //
+            // 只有 follow 覆盖不到的才补分页：已经有实时事件、却还没有基线的 store（通知唤起
+            // 的那种，historyCursor 已经有权威值）。随后的 loadHistory 见没有权威游标会直接
+            // 跳过，转写保持加载态等 snapshot，多发一次也是空操作。
+            val following = coordinator?.follow(sessionId, maxMessages = INITIAL_HISTORY_MESSAGES) == true
+            if (following) return@launch
             if (!store.historyLoaded) loadHistory(store)
         }
     }
@@ -384,7 +423,8 @@ class PhoneModel private constructor(app: Application) {
                 store.sessionId,
                 throughSeq,
                 if (loadingOlder) store.firstSeq else null,
-                50,
+                // 首屏窄、往上翻宽：见 INITIAL_HISTORY_MESSAGES 的说明。
+                if (loadingOlder) HISTORY_MESSAGES else INITIAL_HISTORY_MESSAGES,
             )
             store.loadHistory(value, replacing = !loadingOlder)
             store.historyError = null
@@ -401,8 +441,11 @@ class PhoneModel private constructor(app: Application) {
     fun retryHistory(sessionId: SessionId) {
         val store = sessions[sessionId] ?: return
         store.historyError = null
-        coordinator?.refollow(sessionId)
-        scope.launch { if (!store.historyLoaded) loadHistory(store) }
+        // 重开 follow 就够了：snapshot 就是基线；再叠一次分页只会把同一段历史拉两遍。
+        // 只有连 follow 都登记不上（coordinator 已经拆掉）时才退回分页。
+        if (coordinator?.refollow(sessionId) != true) {
+            scope.launch { loadHistory(store) }
+        }
     }
 
     fun loadEarlier(store: SessionStore) {
@@ -534,11 +577,42 @@ class PhoneModel private constructor(app: Application) {
 
     // —— 发送 ——————————————————————————————————————————————————
 
+    /**
+     * 草稿行首的 `/命令`：与主机 `parseCommand` 同一口径——名字后必须是行尾或空白，
+     * 所以 `/usr/bin` 这类路径不会被当成命令。
+     */
+    private val commandLinePattern = Regex("^/([a-z][a-z0-9_-]*)(?=$|[\\t\\n\\r ])")
+
     suspend fun send(text: String, sessionId: SessionId, attachments: List<PhoneAttachment>): Boolean {
         val client = api ?: return false
         val store = sessions[sessionId] ?: return false
         val trimmed = text.trim()
         if (trimmed.isEmpty() && attachments.isEmpty()) return false
+        // 行首的斜杠命令走主机的命令通道，不能当作普通提示词交给模型：
+        // 主机才会跑处理器并落 command/run、command/done，`/plan …` 也由此真正进入计划模式。
+        if (attachments.isEmpty() && commandLinePattern.containsMatchIn(trimmed)) {
+            val execution = try {
+                client.commandsExecute(sessionId, trimmed)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                lastErrorMessage = describe(e)
+                return false
+            }
+            if (execution != null) {
+                val failure = execution.result?.takeIf { it.kind != "success" }?.text
+                if (failure != null) {
+                    lastErrorMessage = failure
+                    store.historyError = HistoryError("internal", failure)
+                } else {
+                    store.historyError = null
+                    store.blank = false
+                }
+                listStore.markEngaged(sessionId)
+                return true
+            }
+            // 主机没认下这个名字：按普通消息继续（与 web `matchEnter` 的落点一致）。
+        }
         val requestId = UUID.randomUUID().toString()
         store.beginPendingSubmission(requestId, if (store.running) "queued" else "transcript", trimmed)
         val content = mutableListOf<PromptContentPart>()
@@ -823,8 +897,13 @@ class PhoneModel private constructor(app: Application) {
         entry.label?.let { store.title = it }
         store.running = entry.running
         selectedSessionId = entry.sessionId
-        coordinator?.follow(entry.sessionId, SessionAddress.Subagent(address))
-        if (!store.historyLoaded) loadHistory(store)
+        // 与 open() 同一条规矩：首屏只拉一份，follow 建不起来时才补分页。
+        val following = coordinator?.follow(
+            entry.sessionId,
+            SessionAddress.Subagent(address),
+            INITIAL_HISTORY_MESSAGES,
+        ) == true
+        if (!following && !store.historyLoaded) loadHistory(store)
         return entry.sessionId
     }
 
@@ -873,7 +952,10 @@ class PhoneModel private constructor(app: Application) {
                 val commands = runCatching { client.commandsList(sessionId) }.getOrDefault(emptyList())
                 val skills = runCatching { client.skillList(sessionId).skills }.getOrDefault(emptyList())
                 commands.filter { needle.isEmpty() || it.name.lowercase().contains(needle) }.take(8).map {
-                    PhoneSuggestion("cmd:${it.name}", "/${it.name}", it.description, "command", "/${it.name} ")
+                    PhoneSuggestion(
+                        "cmd:${it.name}", "/${it.name}", it.description, "command",
+                        "/${it.name} ", it.input?.hint, wantsArgs = it.input != null,
+                    )
                 } + skills.filter { needle.isEmpty() || it.name.lowercase().contains(needle) }.take(5).map {
                     PhoneSuggestion("skill:${it.name}", "$${it.name}", it.description, "sparkle", "$${it.name} ")
                 }
@@ -1066,11 +1148,49 @@ class PhoneModel private constructor(app: Application) {
     }
 
     companion object {
+        private const val TAG = "PhoneModel"
+
         /** 上一次真正开出新会话时用的工作区（新建会话页的默认选中项）。 */
         private const val LAST_WORKSPACE_KEY = "phone.workspace.lastNewSession"
 
-        fun describe(error: Throwable): String =
-            (error as? ApiException)?.detail ?: error.message ?: error.toString()
+        /**
+         * 打开一条会话时首屏要几轮消息。
+         *
+         * 主机按"消息数"分页：每多一轮就多带几条事件（一轮消息 ~8 条）。50 是按
+         * web 的旧默认值抄来的，对手机屏太大——首屏多出几百条事件，纯是噪音，
+         * 用户往上翻才有意义。15 轮够铺满一屏并留出滚动余量，往上翻时再按
+         * [HISTORY_MESSAGES] 分页补。
+         */
+        private const val INITIAL_HISTORY_MESSAGES = 15
+
+        /**
+         * 之后每一页要几轮消息。
+         *
+         * 比首屏大：用户已经明确在往上翻，一次多给一点少一次往返。
+         */
+        private const val HISTORY_MESSAGES = 30
+
+        /**
+         * 面向用户的失败文案：把底层异常收敛成一句人话。
+         *
+         * 传输/解析失败在 [ApiClient] 里被包成 code = "internal" 的 [ApiException]，
+         * 它的 detail 就是 `java.io.EOFException` 这类原样异常文本——直接端给用户
+         * 看不懂也没有可操作性，这里一律换成兜底文案。主机主动回的业务错误
+         * （code 非 internal）本身通常是可读的，保留。
+         */
+        fun describe(error: Throwable): String {
+            Log.w(TAG, "request failed: ${rawDescription(error)}")
+            val hostMessage = (error as? ApiException)
+                ?.takeIf { it.code != "internal" }
+                ?.detail
+                ?.takeIf { it.isNotBlank() }
+            return hostMessage ?: Strings.operationFailed
+        }
+
+        /** 原始异常文本：只用于日志排查，绝不直接展示给用户。 */
+        fun rawDescription(error: Throwable): String =
+            (error as? ApiException)?.let { "${it.code}: ${it.detail}" }
+                ?: error.message ?: error.toString()
 
         /**
          * 进程内唯一实例。由 [DshApplication.onCreate] 在首帧之前建好，

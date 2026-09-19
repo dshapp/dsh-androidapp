@@ -276,7 +276,27 @@ data class AgentPresetListValue(
 // 命令与 skills ————————————————————————————————————————————————
 
 @Serializable
-data class CommandDescriptor(val name: String, val description: String = "")
+data class CommandInputDescriptor(val hint: String = "", val attachments: Boolean = false)
+
+@Serializable
+data class CommandDescriptor(
+    val name: String,
+    val description: String = "",
+    val input: CommandInputDescriptor? = null,
+)
+
+/**
+ * `commands/execute` 的结果。主机只在命令行命中某条命令时才回值（未命中回 null），
+ * 所以这里同时是"这条草稿是不是命令"的判据。
+ */
+@Serializable
+data class CommandExecutionValue(
+    val commandId: String = "",
+    val result: CommandResultValue? = null,
+)
+
+@Serializable
+data class CommandResultValue(val kind: String = "success", val text: String? = null)
 
 @Serializable
 data class SkillEntry(val name: String, val description: String? = null, val modelInvocable: Boolean = false)

@@ -168,6 +168,18 @@ class SessionListStore(private val prefs: SharedPreferences?) {
         syncCompletedNotifications()
     }
 
+    /**
+     * 用本机缓存里的清单铺底，让冷启动立刻有列表可画。
+     *
+     * 只在还没有任何远端数据时铺（连接刚开始、列表是空的），所以它永远不会盖掉
+     * 已经落库的基线；随后 refreshInternal 会把整份换成权威答案。title/agentPreset
+     * 这些投影随行一起进来，投影账本也因此重建，和一次正常刷新没有区别。
+     */
+    fun seedFromCache(items: List<SessionSummary>) {
+        if (items.isEmpty() || sessions.isNotEmpty()) return
+        replaceSessions(items)
+    }
+
     fun upsert(summary: SessionSummary) {
         record(RosterMutation.Upserted(summary))
         val index = sessions.indexOfFirst { it.sessionId == summary.sessionId }

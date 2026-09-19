@@ -4,8 +4,10 @@ import ai.deepseek.dshphone.model.*
 import ai.deepseek.dshphone.net.*
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -21,6 +23,8 @@ import kotlinx.serialization.json.put
 class StreamCoordinator(
     private val api: ApiClient,
     private val scope: CoroutineScope,
+    /** 本机缓存；每次拿到完整的 follow 快照后把窗口落盘，供下次冷启动先画。 */
+    private val cache: SessionCache? = null,
     private val listStore: SessionListStore,
     private val workspaceStore: WorkspaceStore,
     private val sessionLookup: (SessionId) -> SessionStore?,
@@ -40,6 +44,13 @@ class StreamCoordinator(
         const val EVENTS = "events"
         const val WORKSPACES = "workspaces"
         const val CONTROL = "control"
+        /**
+         * follow 快照默认带几轮消息，与 PhoneModel 的首屏口径一致。
+         *
+         * 这里只兜底调用方没显式给窗口的情况（[reopenAssistantStream]、补洞重开）；
+         * 首屏那份由 PhoneModel.INITIAL_HISTORY_MESSAGES 明确指定。
+         */
+        private const val DEFAULT_FOLLOW_MESSAGES = 15
         fun followStreamId(sessionId: SessionId) = "follow:$sessionId"
         fun sessionIdOfFollow(streamId: String): SessionId? =
             if (streamId.startsWith("follow:")) streamId.removePrefix("follow:") else null
@@ -87,8 +98,13 @@ class StreamCoordinator(
 
     fun probeNow() { mux?.probeNow() }
 
-    /** 打开一个会话的实时窗口，幂等。 */
-    fun follow(sessionId: SessionId, address: SessionAddress? = null, maxMessages: Int = 50) {
+    /**
+     * 打开一个会话的实时窗口，幂等。
+     *
+     * @returns 订阅是否已经登记。登记之后每一代连接都会自动重开，所以调用方可以据此
+     *   判断"基线已经有人给了"，不必再自己发一次分页。
+     */
+    fun follow(sessionId: SessionId, address: SessionAddress? = null, maxMessages: Int = DEFAULT_FOLLOW_MESSAGES): Boolean {
         val target = address ?: SessionAddress.Session(sessionId)
         followAddresses[sessionId] = target
         val addressJson = when (target) {
@@ -113,13 +129,14 @@ class StreamCoordinator(
                 })
             },
         )
+        return true
     }
 
     /** 重开一条 follow：流失败后重试基线用（subscribe 幂等，失败的那条得先撤掉）。 */
-    fun refollow(sessionId: SessionId) {
+    fun refollow(sessionId: SessionId): Boolean {
         val address = followAddresses[sessionId] ?: SessionAddress.Session(sessionId)
         unfollow(sessionId)
-        follow(sessionId, address)
+        return follow(sessionId, address)
     }
 
     fun unfollow(sessionId: SessionId) {
@@ -347,6 +364,13 @@ class StreamCoordinator(
                     replacing = true,
                 )
                 store.subscribe(frame.cursor)
+                // 快照就是这条会话最新的窗口，落盘留给下次冷启动。写盘不挂在
+                // 下行收集上：大窗口落盘要几十毫秒，不该拖住后面的实时帧。
+                val cache = cache
+                if (cache != null) {
+                    val window = CachedWindow(frame.cursor, frame.hasMore, store.historyWindow)
+                    scope.launch(Dispatchers.IO) { cache.saveWindow(sessionId, window) }
+                }
                 store.applyAssistantStreamBaseline(frame.assistantStream)
                 val attempt = frame.assistantStream?.activeAttempt
                 if (attempt == null) assistantExpectations.remove(sessionId)

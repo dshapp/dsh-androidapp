@@ -193,6 +193,12 @@ object Strings {
     val viewOptions: String get() = pick("View options", "视图选项")
     val reorderGroups: String get() = pick("Touch and hold to reorder groups", "长按拖动调整分组顺序")
     val disconnected: String get() = pick("Not connected", "未连接")
+    // 顶部全局连接提示条：连不上时只说人话，底层异常绝不端到用户面前。
+    val offlineBannerTitle: String get() = pick("Can’t reach your Desktop", "无法连接到电脑")
+    val offlineBannerBody: String get() =
+        pick("Check that DSH is running on your Desktop and this phone is online.", "请确认电脑上的 DSH 正在运行，且手机网络正常。")
+    /** 其余请求失败的兜底文案：不暴露异常类型与堆栈信息。 */
+    val operationFailed: String get() = pick("Something went wrong. Please try again.", "操作失败，请重试。")
     val showMore: String get() = pick("Show %d more", "再显示 %d 个")
     val approve: String get() = pick("Approve once", "本次允许")
     val deny: String get() = pick("Deny", "拒绝")

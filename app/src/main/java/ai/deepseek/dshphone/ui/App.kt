@@ -4,18 +4,24 @@ import ai.deepseek.dshphone.LaunchRequest
 import ai.deepseek.dshphone.state.Connection
 import ai.deepseek.dshphone.state.PhoneModel
 import ai.deepseek.dshphone.state.PairingPayload
+import ai.deepseek.dshphone.ui.component.ConnectionBanner
 import ai.deepseek.dshphone.ui.screen.ChatScreen
 import ai.deepseek.dshphone.ui.screen.NewSessionScreen
 import ai.deepseek.dshphone.ui.screen.OnboardingScreen
 import ai.deepseek.dshphone.ui.screen.PairingScreen
 import ai.deepseek.dshphone.ui.screen.SettingsScreen
 import ai.deepseek.dshphone.ui.screen.SessionListScreen
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -60,57 +66,66 @@ fun DshApp(model: PhoneModel, launch: LaunchRequest?, onLaunchHandled: () -> Uni
         onLaunchHandled()
     }
 
-    NavHost(navController = navController, startDestination = "root") {
-        composable("root") {
-            if (model.profiles.profiles.isEmpty()) {
-                OnboardingScreen(onScan = { scanning = true })
-            } else {
-                SessionListScreen(
+    // 根容器只做一件事：把全局连接提示条盖在导航内容之上，任何页面都看得到。
+    // 提示条自己吃掉状态栏内边距，所以不会被系统栏压住；其余页面照旧从顶栏开始画。
+    Box(Modifier.fillMaxSize()) {
+        NavHost(navController = navController, startDestination = "root") {
+            composable("root") {
+                if (model.profiles.profiles.isEmpty()) {
+                    OnboardingScreen(onScan = { scanning = true })
+                } else {
+                    SessionListScreen(
+                        model = model,
+                        onOpenSession = { navController.navigate("chat/$it") },
+                        onOpenSettings = { navController.navigate("settings") },
+                        onNewSession = { navController.navigate("new") },
+                    )
+                }
+            }
+            composable("settings") {
+                SettingsScreen(
                     model = model,
+                    onBack = { navController.popBackStack() },
+                    onScan = { scanning = true },
+                )
+            }
+            composable("new") {
+                NewSessionScreen(
+                    model = model,
+                    onBack = { navController.popBackStack() },
+                    // 发出第一条消息后这页就没用了：换成会话页，返回键直接回到列表。
+                    onCreated = {
+                        navController.navigate("chat/$it") {
+                            popUpTo("new") { inclusive = true }
+                        }
+                    },
+                )
+            }
+            composable("chat/{sessionId}") { entry ->
+                val sessionId = entry.arguments?.getString("sessionId") ?: return@composable
+                ChatScreen(
+                    model = model,
+                    sessionId = sessionId,
+                    onBack = { navController.popBackStack() },
                     onOpenSession = { navController.navigate("chat/$it") },
-                    onOpenSettings = { navController.navigate("settings") },
-                    onNewSession = { navController.navigate("new") },
                 )
             }
         }
-        composable("settings") {
-            SettingsScreen(
-                model = model,
-                onBack = { navController.popBackStack() },
-                onScan = { scanning = true },
-            )
-        }
-        composable("new") {
-            NewSessionScreen(
-                model = model,
-                onBack = { navController.popBackStack() },
-                // 发出第一条消息后这页就没用了：换成会话页，返回键直接回到列表。
-                onCreated = {
-                    navController.navigate("chat/$it") {
-                        popUpTo("new") { inclusive = true }
-                    }
+
+        if (scanning) {
+            PairingScreen(
+                onDismiss = { scanning = false },
+                onPaired = { name, payload ->
+                    val profile = model.profiles.add(name, payload)
+                    scanning = false
+                    if (profile != null) model.connect(profile)
                 },
             )
         }
-        composable("chat/{sessionId}") { entry ->
-            val sessionId = entry.arguments?.getString("sessionId") ?: return@composable
-            ChatScreen(
-                model = model,
-                sessionId = sessionId,
-                onBack = { navController.popBackStack() },
-                onOpenSession = { navController.navigate("chat/$it") },
-            )
-        }
-    }
 
-    if (scanning) {
-        PairingScreen(
-            onDismiss = { scanning = false },
-            onPaired = { name, payload ->
-                val profile = model.profiles.add(name, payload)
-                scanning = false
-                if (profile != null) model.connect(profile)
-            },
+        ConnectionBanner(
+            model = model,
+            modifier = Modifier.align(Alignment.TopCenter).zIndex(1f),
         )
     }
 }

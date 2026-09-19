@@ -883,9 +883,10 @@ private fun BoxScope.StatusOverlay(
 ) {
     val connection = model.connection
     when {
-        connection is Connection.Failed -> ToastNotice(
-            Icons.Default.WarningAmber, Strings.disconnected, connection.message,
-        )
+        // 连不上：顶部全局提示条已经把状态与重试说清楚了，这里不再弹一层居中提示；
+        // 只有当列表确实空着时才补一句占位，避免用户对着一片空白猜。
+        connection is Connection.Failed && model.listStore.sessions.isEmpty() ->
+            EmptyState(Icons.Default.CloudOff, Strings.offlineBannerTitle, Strings.offlineBannerBody)
         connection is Connection.Connecting && model.listStore.sessions.isEmpty() ->
             CircularProgressIndicator(Modifier.align(Alignment.Center))
         // 空状态认合并后的命中：本地名称匹配也算结果，只有两边都没有才算「没搜到」。
@@ -893,46 +894,6 @@ private fun BoxScope.StatusOverlay(
             EmptyState(Icons.Default.SearchOff, Strings.searchNoResults, query)
         !searching && model.listStore.sessions.isEmpty() && connection is Connection.Connected ->
             EmptyState(Icons.AutoMirrored.Filled.Chat, Strings.noSessions, null)
-    }
-}
-
-/**
- * 浮在列表之上的提示（未连接等）：用 Toast 的样式——不透明的深色圆角胶囊 + 投影，
- * 避免透明背景跟下方的会话行糊在一起。
- */
-@Composable
-private fun BoxScope.ToastNotice(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    title: String,
-    description: String?,
-) {
-    Surface(
-        modifier = Modifier
-            .align(Alignment.Center)
-            .padding(32.dp)
-            .widthIn(max = 360.dp),
-        shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.inverseSurface,
-        contentColor = MaterialTheme.colorScheme.inverseOnSurface,
-        shadowElevation = 6.dp,
-    ) {
-        Row(
-            Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(icon, null, Modifier.size(20.dp))
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(title, style = MaterialTheme.typography.titleSmall)
-                description?.let {
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = LocalContentColor.current.copy(alpha = 0.8f),
-                    )
-                }
-            }
-        }
     }
 }
 

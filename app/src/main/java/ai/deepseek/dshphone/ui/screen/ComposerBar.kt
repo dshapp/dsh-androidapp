@@ -90,6 +90,8 @@ fun ComposerBar(
     }
     var attachments by remember(sessionId) { mutableStateOf<List<PhoneAttachment>>(emptyList()) }
     var suggestions by remember { mutableStateOf<List<PhoneSuggestion>>(emptyList()) }
+    /** 加号启动器：草稿里没有斜杠 token 也把命令候选唤出来（Mac `toggleCommandLauncher` 的对应物）。 */
+    var commandLauncher by remember(sessionId) { mutableStateOf(false) }
     var attachMenu by remember { mutableStateOf(false) }
     var permissionMenu by remember { mutableStateOf(false) }
     var modelPicker by remember { mutableStateOf(false) }
@@ -129,6 +131,13 @@ fun ComposerBar(
         }
     }
 
+    /**
+     * 带参数的命令（`input` 非空）只在行首上下文里出现，行中间只列不带参数的那些——
+     * Mac `commandCandidates` 的 `position == .leading || command.input == nil` 口径。
+     */
+    fun filterForPosition(items: List<PhoneSuggestion>, leading: Boolean): List<PhoneSuggestion> =
+        if (leading) items else items.filterNot { it.wantsArgs }
+
     fun refreshSuggestions(value: String) {
         val token = TriggerToken.parse(value)
         if (token == null) {
@@ -137,7 +146,29 @@ fun ComposerBar(
         }
         scope.launch {
             val items = model.suggestions(token, sessionId)
-            if (TriggerToken.parse(draft.text) == token) suggestions = items
+            if (TriggerToken.parse(draft.text) == token) {
+                suggestions = if (token.kind == TriggerToken.Kind.COMMAND) {
+                    filterForPosition(items, draft.text.take(token.start).isBlank())
+                } else {
+                    items
+                }
+            }
+        }
+    }
+
+    /**
+     * 加号启动器：不管草稿里有没有斜杠 token，都把命令候选唤出来。
+     *
+     * Mac 的 `toggleCommandLauncher` 只换菜单、绝不动草稿；这里同样不碰正文，
+     * 所以先输入文字再点加号不会再被清空。空查询等于"列出全部命令"。
+     */
+    fun launchCommandLauncher() {
+        val at = draft.selection.end.coerceIn(0, draft.text.length)
+        val leading = draft.text.take(at).isBlank()
+        commandLauncher = true
+        scope.launch {
+            val items = model.suggestions(TriggerToken(TriggerToken.Kind.COMMAND, "", 0, 0), sessionId)
+            if (commandLauncher) suggestions = filterForPosition(items, leading)
         }
     }
 
@@ -198,7 +229,15 @@ fun ComposerBar(
                         val text = draft.text.replaceRange(token.start, token.end, suggestion.insert)
                         draft = TextFieldValue(text, TextRange(token.start + suggestion.insert.length))
                         model.setDraft(text, sessionId)
+                    } else if (commandLauncher) {
+                        // 加号启动器：草稿里没有可替换的斜杠 token，就插到光标处（Mac pick 对零宽
+                        // span 的处理），已经输入的正文原样留着。
+                        val at = draft.selection.end.coerceIn(0, draft.text.length)
+                        val text = draft.text.substring(0, at) + suggestion.insert + draft.text.substring(at)
+                        draft = TextFieldValue(text, TextRange(at + suggestion.insert.length))
+                        model.setDraft(text, sessionId)
                     }
+                    commandLauncher = false
                     suggestions = emptyList()
                 }
             }
@@ -233,12 +272,30 @@ fun ComposerBar(
                         val next = atomicTokenEdit(draft, it)
                         draft = next
                         model.setDraft(next.text, sessionId)
+                        commandLauncher = false
                         refreshSuggestions(next.text)
                     },
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(
-                        onClick = { draft = TextFieldValue("/", TextRange(1)); refreshSuggestions("/") },
+                        onClick = {
+                            // Mac/iOS 的加号只是命令启动器：不覆盖草稿。草稿为空时仍落一个 "/"，
+                            // 让"直接打字过滤命令"这条老路子（点加号 → 输入 plan → 选 Plan）保持不变；
+                            // 草稿已有正文时只换菜单、绝不动正文（对齐 Mac toggleCommandLauncher）。
+                            when {
+                                commandLauncher -> {
+                                    commandLauncher = false
+                                    suggestions = emptyList()
+                                }
+                                draft.text.isEmpty() -> {
+                                    draft = TextFieldValue("/", TextRange(1))
+                                    model.setDraft("/", sessionId)
+                                    commandLauncher = false
+                                    refreshSuggestions("/")
+                                }
+                                else -> launchCommandLauncher()
+                            }
+                        },
                         modifier = Modifier.size(32.dp),
                     ) {
                         Icon(Icons.Default.Add, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -833,6 +890,16 @@ private fun SuggestionList(suggestions: List<PhoneSuggestion>, onPick: (PhoneSug
                     maxLines = 1,
                     softWrap = false,
                 )
+                // 带参数的命令把用法提示贴在名字后面（Mac 的 candidate.hint）。
+                suggestion.hint?.takeIf { it.isNotEmpty() }?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
+                }
                 suggestion.subtitle?.takeIf { it.isNotEmpty() }?.let {
                     Text(
                         it,

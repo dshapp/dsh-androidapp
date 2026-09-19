@@ -408,6 +408,19 @@ class SessionStore(val sessionId: SessionId) {
         replayHistory()
     }
 
+    /**
+     * 把本机缓存里的窗口铺出来，供点开会话时立刻看到内容（stale-while-revalidate）。
+     *
+     * 只是一份"先看着"的底稿：不设 historyLoaded、也不动 lastSeq/historyCursor，
+     * 所以它不参与任何裁切与去重判定；follow 的 snapshot 回来照样 replacing 整体替换，
+     * 已有实时内容或已加载过的窗口也不会被它盖掉。
+     */
+    fun seedFromCache(window: CachedWindow) {
+        if (historyLoaded || eventWindow.entries.isNotEmpty() || window.records.isEmpty()) return
+        eventWindow.replace(SessionHistoryValue(window.records, window.hasMore, null))
+        replayHistory()
+    }
+
     fun subscribe(authoritativeLastSeq: Int) {
         subscribedLastSeq = authoritativeLastSeq
         align(authoritativeLastSeq)

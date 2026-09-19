@@ -2,6 +2,7 @@ package ai.deepseek.dshphone.net
 
 import ai.deepseek.dshphone.model.AgentPresetListValue
 import ai.deepseek.dshphone.model.CommandDescriptor
+import ai.deepseek.dshphone.model.CommandExecutionValue
 import ai.deepseek.dshphone.model.FileReferenceItem
 import ai.deepseek.dshphone.model.GoalCreateValue
 import ai.deepseek.dshphone.model.GoalRef
@@ -28,7 +29,9 @@ import ai.deepseek.dshphone.model.WorkspaceFileTextValue
 import ai.deepseek.dshphone.model.WorkspaceOrderValue
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -80,9 +83,25 @@ private fun request(block: kotlinx.serialization.json.JsonObjectBuilder.() -> Un
 
 // —— session ——————————————————————————————————————————————————
 
+/**
+ * 会话列表。
+ *
+ * `_request.projections` 不是主机的字段，是给手机链路（mobile bridge）的提示：列表行只画
+ * `title` 和 `agentPreset`，其余十几份投影块是这条响应体积的大头，由 bridge 在转发时丢掉。
+ * 主机不认识这个字段会直接忽略，所以直连主机时（或多客户端共享 bridge 时）行为不变。
+ */
 suspend fun ApiClient.sessionList(): SessionListValue =
-    call("session/list", buildJsonObject { put("_request", JsonObject(emptyMap())) })
-        .decodeOrNull<SessionListValue>() ?: SessionListValue()
+    call(
+        "session/list",
+        buildJsonObject {
+            put("_request", buildJsonObject {
+                put("projections", buildJsonArray {
+                    add(JsonPrimitive("title"))
+                    add(JsonPrimitive("agentPreset"))
+                })
+            })
+        },
+    ).decodeOrNull<SessionListValue>() ?: SessionListValue()
 
 suspend fun ApiClient.sessionSearch(query: String): SessionSearchValue =
     call("session/search", request { put("query", query) })
@@ -239,8 +258,12 @@ suspend fun ApiClient.commandsList(sessionId: SessionId): List<CommandDescriptor
     (call("commands/list", buildJsonObject { put("agentId", sessionId) }).arr ?: emptyList())
         .mapNotNull { it.decodeOrNull<CommandDescriptor>() }
 
-suspend fun ApiClient.commandsExecute(sessionId: SessionId, line: String) {
-    call(
+/**
+ * 执行一条斜杠命令行。返回 null 表示主机没认出这条命令（语法不合法或名字不在目录里）；
+ * 认出但处理器失败时仍返回非 null，错误在 [CommandExecutionValue.result] 里。
+ */
+suspend fun ApiClient.commandsExecute(sessionId: SessionId, line: String): CommandExecutionValue? {
+    val value = call(
         "commands/execute",
         buildJsonObject {
             put("agentId", sessionId)
@@ -248,6 +271,8 @@ suspend fun ApiClient.commandsExecute(sessionId: SessionId, line: String) {
             put("submittedAttachments", JsonArray(emptyList()))
         },
     )
+    if (value is JsonNull) return null
+    return value.decodeOrNull<CommandExecutionValue>()
 }
 
 suspend fun ApiClient.sessionSelectPermission(sessionId: SessionId, presetId: String) {

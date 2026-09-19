@@ -52,6 +52,9 @@ class MuxStream(
         private const val BACKOFF_BASE_MS = 500L
         private const val BACKOFF_CAP_MS = 10_000L
         private const val STABLE_GENERATION_MS = 30_000L
+
+        /** 探活用的一次性 streamId：不会被任何真实流占用，主机的 cancel 对它就是 no-op。 */
+        private const val PROBE_STREAM_ID = "wake-probe"
     }
 
     private val events = MutableSharedFlow<MuxEvent>(
@@ -129,11 +132,24 @@ class MuxStream(
 
     fun isSubscribed(streamId: String): Boolean = synchronized(lock) { subscriptions.containsKey(streamId) }
 
+    /**
+     * 探活帧的正文；公开给单测，钉住它符合主机 `parseRemoteStreamClientMessage` 的口径。
+     *
+     * 必须是主机认识的上行帧。之前这里是 `{"type":"ping"}`：主机只接受
+     * `{type:"cancel",streamId}` 与 `{type:"open",streamId,endpoint,payload}`，其余一律
+     * throw，socket 处理器 catch 后 `close(1008, "invalid Remote stream request")`。于是每次
+     * 回前台都会拆掉一条健康连接（runLoop 退避重连，非 CONNECTED 转换还会
+     * dropStaleInteractions() 清空待审批/待回答，而 snapshot 不重送）。
+     *
+     * 用一个专门给探活的空 cancel：主机对未知 streamId 的 cancel 是 no-op
+     * （`streams.get(id)?.abort`），打不着任何在跑的流，形状又是主机认的。
+     */
+    internal fun probeFrame(): String = "{\"type\":\"cancel\",\"streamId\":\"$PROBE_STREAM_ID\"}"
+
     /** 立刻探活当前这一代连接（回到前台时用）。 */
     fun probeNow() {
         val ws = synchronized(lock) { socket } ?: return
-        // OkHttp 没有显式 ping API，这里发一个空 cancel 帧探活；失败会触发 onFailure。
-        if (!ws.send("{\"type\":\"ping\"}")) {
+        if (!ws.send(probeFrame())) {
             Log.w(TAG, "wake probe failed; failing the generation")
             ws.cancel()
         }

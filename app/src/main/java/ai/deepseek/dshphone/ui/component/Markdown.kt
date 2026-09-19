@@ -132,6 +132,10 @@ private class MarkdownScope(
     val tasks: Map<ListItem, Boolean>,
     val mentions: List<String>,
     val onOpenFile: (String) -> Unit,
+    /** 会话内查找的查询词；空串表示不在查找态。 */
+    val findQuery: String,
+    /** 命中字的行内样式；不在查找态时为 null。 */
+    val findStyle: SpanStyle?,
 )
 
 /**
@@ -146,9 +150,16 @@ fun MarkdownText(
     modifier: Modifier = Modifier,
     fileMentions: List<String> = emptyList(),
     onOpenFile: (String) -> Unit = {},
+    /** 会话内查找的查询词；空串表示不画高亮。 */
+    findQuery: String = "",
+    /** 这一块所属的行是否查找栏当前停靠的命中行。 */
+    findActive: Boolean = false,
 ) {
     val doc = remember(text) { parseMarkdown(text) }
-    val scope = remember(doc, fileMentions) { MarkdownScope(doc.tasks, fileMentions, onOpenFile) }
+    val findStyle = if (findQuery.isBlank()) null else findSpanStyle(findActive)
+    val scope = remember(doc, fileMentions, findQuery, findStyle) {
+        MarkdownScope(doc.tasks, fileMentions, onOpenFile, findQuery, findStyle)
+    }
     Column(modifier = modifier.fillMaxWidth()) {
         RenderBlocks(doc.document, scope, depth = 0, compact = false)
     }
@@ -548,8 +559,13 @@ private fun inlineText(parent: Node, scope: MarkdownScope): AnnotatedString = bu
         var child = node
         while (child != null) {
             val current = child
+            // 查找命中词逐字染色；不在查找态（findStyle 为 null）时原样追加。
+            fun appendRun(run: String) {
+                val style = scope.findStyle
+                if (style != null) appendFindHighlighted(run, scope.findQuery, style) else append(run)
+            }
             when (current) {
-                is MdText -> append(current.literal)
+                is MdText -> appendRun(current.literal)
                 is Code -> {
                     // 行内代码若正好是本轮产出的文件，就变成可点的提及，点开只读预览。
                     val path = if (scope.mentions.isEmpty()) null
@@ -569,10 +585,10 @@ private fun inlineText(parent: Node, scope: MarkdownScope): AnnotatedString = bu
                                 scope.onOpenFile(path)
                             }
                         )
-                        append(padded)
+                        appendRun(padded)
                         pop()
                     } else {
-                        withStyleSpan(codeStyle) { append(padded) }
+                        withStyleSpan(codeStyle) { appendRun(padded) }
                     }
                 }
                 is Emphasis -> withStyleSpan(SpanStyle(fontStyle = FontStyle.Italic)) { walk(current.firstChild) }

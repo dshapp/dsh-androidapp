@@ -1,14 +1,18 @@
 package ai.deepseek.dshphone.ui.screen
 
 import ai.deepseek.dshphone.i18n.Strings
+import ai.deepseek.dshphone.i18n.fmt
 import ai.deepseek.dshphone.model.*
 import ai.deepseek.dshphone.net.SessionId
 import ai.deepseek.dshphone.state.PhoneModel
+import ai.deepseek.dshphone.ui.component.DshFind
 import ai.deepseek.dshphone.ui.component.EmptyStateColumn
 import ai.deepseek.dshphone.ui.component.MessageRow
 import ai.deepseek.dshphone.ui.theme.Dimens
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -54,6 +58,9 @@ fun ChatScreen(
     val store = model.sessions[sessionId]
     var finding by remember { mutableStateOf(false) }
     var findQuery by remember { mutableStateOf("") }
+    // 查找栏停靠的命中行下标。查询一变回到第 1 条（Safari 边打边找的口径），
+    // 上一条 / 下一条在这里循环。
+    var activeHit by remember { mutableStateOf(0) }
     var showPanel by remember { mutableStateOf(false) }
     var moreMenu by remember { mutableStateOf(false) }
     var turnMenu by remember { mutableStateOf(false) }
@@ -75,6 +82,7 @@ fun ChatScreen(
         focusManager.clearFocus()
         finding = false
         findQuery = ""
+        activeHit = 0
     }
 
     LaunchedEffect(sessionId) { model.open(sessionId) }
@@ -104,6 +112,10 @@ fun ChatScreen(
         if (!finding || needle.isEmpty()) rows
         else rows.filter { chatNodeSearchText(it).contains(needle, ignoreCase = true) }
     }
+
+    // LazyColumn 顶部的「加载更早」哨兵占一格；命中行在列表里的真实位置要把它算进去，
+    // 否则步进会整体少一行，停在命中行的上一行上。
+    val earlierRow = if (store?.hasMore == true && store.historyLoaded && visibleNodes.isNotEmpty()) 1 else 0
 
     val atBottom by remember {
         derivedStateOf {
@@ -158,6 +170,31 @@ fun ChatScreen(
         }
     }
 
+    // 上一条 / 下一条命中：在筛过的命中行之间循环（两端环绕，与桌面端页内查找一致），
+    // 并把停靠行滚进视野。命中为空时什么也不做。
+    fun stepFind(delta: Int) {
+        val count = visibleNodes.size
+        if (!finding || findQuery.isBlank() || count == 0) return
+        val next = ((activeHit + delta) % count + count) % count
+        activeHit = next
+        followTail = false
+        val row = next + earlierRow
+        scope.launch { listState.animateScrollToItem(row) }
+    }
+
+    // 查询词一变就是一组新结果，光标回到第 1 条并从顶部落位。
+    LaunchedEffect(findQuery, finding) {
+        activeHit = 0
+        if (finding && findQuery.isNotBlank() && visibleNodes.isNotEmpty()) {
+            listState.scrollToItem(earlierRow)
+        }
+    }
+
+    // 结果集缩小（继续打字、历史重载）时把光标夹回范围内。
+    LaunchedEffect(visibleNodes.size) {
+        if (activeHit >= visibleNodes.size) activeHit = 0
+    }
+
     // 贴底就是最新一轮，否则取阅读线之上最近的带轮次行（与 iOS 的几何判定同义）。
     LaunchedEffect(atBottom, listState.firstVisibleItemIndex, visibleNodes.size) {
         railActiveTurn = if (atBottom) {
@@ -200,13 +237,15 @@ fun ChatScreen(
                             }
                             BasicTextField(
                                 value = findQuery,
-                                onValueChange = { findQuery = it },
+                                // 边打边筛；查询变了光标回到第 1 条。
+                                onValueChange = { findQuery = it; activeHit = 0 },
                                 singleLine = true,
                                 textStyle = MaterialTheme.typography.bodyLarge.copy(
                                     color = MaterialTheme.colorScheme.onSurface,
                                 ),
                                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                                // 结果是边打边筛的，回车只用来收键盘，让出屏幕看命中行。
+                                // 结果是边打边筛的，回车只用来收键盘，让出屏幕看命中行；
+                                // 上一条 / 下一条走标题栏的两个按钮。
                                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                                 keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }),
                                 modifier = Modifier
@@ -225,17 +264,26 @@ fun ChatScreen(
                 },
                 actions = {
                     if (finding) {
-                        // 有查询就报命中行数，免得读者对着空列表猜是不是没搜到。
+                        // 有查询就报「第几条 / 共几条」，免得读者对着空列表猜是不是没搜到。
                         if (findQuery.isNotBlank()) {
                             Text(
-                                visibleNodes.size.toString(),
+                                if (visibleNodes.isEmpty()) "0/0"
+                                else fmt(Strings.findCount, activeHit + 1, visibleNodes.size),
                                 style = MaterialTheme.typography.labelLarge,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
+                        // 上一条 / 下一条：没命中时置灰但保留槽位，数字宽度变化时按钮不左右挪。
+                        val canStep = findQuery.isNotBlank() && visibleNodes.isNotEmpty()
+                        IconButton(onClick = { stepFind(-1) }, enabled = canStep) {
+                            Icon(Icons.Default.KeyboardArrowUp, Strings.findPrevious)
+                        }
+                        IconButton(onClick = { stepFind(1) }, enabled = canStep) {
+                            Icon(Icons.Default.KeyboardArrowDown, Strings.findNext)
+                        }
                         // 清除只清文字并把光标留在框里，退出查找交给返回键，二者不混用。
                         if (findQuery.isNotEmpty()) {
-                            IconButton(onClick = { findQuery = ""; findFocus.requestFocus() }) {
+                            IconButton(onClick = { findQuery = ""; activeHit = 0; findFocus.requestFocus() }) {
                                 Icon(Icons.Default.Close, Strings.close)
                             }
                         }
@@ -298,7 +346,13 @@ fun ChatScreen(
                             DropdownMenuItem(
                                 text = { Text(Strings.findInChat) },
                                 leadingIcon = { Icon(Icons.Default.Search, null) },
-                                onClick = { moreMenu = false; finding = true },
+                                onClick = {
+                                    moreMenu = false
+                                    finding = true
+                                    // 查找期间不再跟随流式输出的尾部：读者在逐条看命中，
+                                    // 被拽回底部会直接丢掉刚跳到的位置。
+                                    followTail = false
+                                },
                             )
                             DropdownMenuItem(
                                 text = { Text(Strings.panel) },
@@ -361,11 +415,19 @@ fun ChatScreen(
                 items(visibleNodes.size, key = { visibleNodes[it].nodeId }) { index ->
                     val node = visibleNodes[index]
                     var rowMenu by remember(node.nodeId) { mutableStateOf(false) }
+                    val isActiveHit = finding && findQuery.isNotBlank() && index == activeHit
                     Box(
-                        Modifier.combinedClickable(
-                            onClick = {},
-                            onLongClick = { rowMenu = true },
-                        )
+                        Modifier
+                            // 当前停靠的命中行铺一层整行底色，撑出与左右内容同宽的一栏。
+                            .then(
+                                if (isActiveHit) Modifier
+                                    .background(DshFind.activeRow, RoundedCornerShape(8.dp))
+                                else Modifier
+                            )
+                            .combinedClickable(
+                                onClick = {},
+                                onLongClick = { rowMenu = true },
+                            )
                     ) {
                         MessageRow(
                             node = node,
@@ -377,6 +439,9 @@ fun ChatScreen(
                             onFork = { seq ->
                                 scope.launch { model.fork(sessionId, seq)?.let(onOpenSession) }
                             },
+                            // 命中行才把查询词交给行内渲染，未命中的行不因查询变化重组。
+                            findQuery = if (finding && findQuery.isNotBlank()) findQuery else "",
+                            findActive = isActiveHit,
                         )
                         DropdownMenu(rowMenu, { rowMenu = false }) {
                             val copyText = chatNodeSearchText(node)
@@ -429,6 +494,9 @@ fun ChatScreen(
             // 只有真的拿到了基线还是零节点才算空会话，取不回来则报错并给重试。
             val historyError = store?.historyError
             when {
+                // 查找一条没命中：给一句「未找到」，别让读者对着一片空白猜。
+                finding && findQuery.isNotBlank() && visibleNodes.isEmpty() && pendingSteering.isEmpty() ->
+                    EmptyStateColumn(Icons.Default.SearchOff, Strings.findNoResults, findQuery)
                 nodes.isNotEmpty() || pendingSteering.isNotEmpty() -> Unit
                 historyError != null -> Column(
                     Modifier

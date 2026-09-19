@@ -33,6 +33,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
@@ -47,13 +48,17 @@ fun MessageRow(
     store: SessionStore?,
     onOpenFile: (String) -> Unit,
     onFork: (Int) -> Unit,
+    /** 会话内查找的查询词；空串表示不在查找态，不画高亮。 */
+    findQuery: String = "",
+    /** 这一行是否查找栏当前停靠的命中行。 */
+    findActive: Boolean = false,
 ) {
     when (node) {
-        is ChatNode.User -> UserBubble(node.content, sessionId, model)
-        is ChatNode.Steering -> UserBubble(node.content, sessionId, model)
+        is ChatNode.User -> UserBubble(node.content, sessionId, model, findQuery, findActive)
+        is ChatNode.Steering -> UserBubble(node.content, sessionId, model, findQuery, findActive)
         is ChatNode.Context -> ContextRow(node)
-        is ChatNode.Assistant -> AssistantRow(node.step, sessionId, model, store, onOpenFile)
-        is ChatNode.Tool -> ToolCard(node.data, cwd)
+        is ChatNode.Assistant -> AssistantRow(node.step, sessionId, model, store, onOpenFile, findQuery, findActive)
+        is ChatNode.Tool -> ToolCard(node.data, cwd, findQuery, findActive)
         is ChatNode.TurnError -> NoticeRow(
             Icons.Default.Warning, node.data.message, MaterialTheme.colorScheme.error, detailed = true,
         )
@@ -71,7 +76,13 @@ fun MessageRow(
 }
 
 @Composable
-private fun UserBubble(content: List<ContentBlock>, sessionId: SessionId, model: PhoneModel) {
+private fun UserBubble(
+    content: List<ContentBlock>,
+    sessionId: SessionId,
+    model: PhoneModel,
+    findQuery: String = "",
+    findActive: Boolean = false,
+) {
     val text = plainText(content)
     val images = content.filterIsInstance<ContentBlock.Image>()
         .mapNotNull { it.attachment?.let { att -> decodeImageRef(att) } }
@@ -92,10 +103,15 @@ private fun UserBubble(content: List<ContentBlock>, sessionId: SessionId, model:
             var copyMenu by remember(text) { mutableStateOf(false) }
             val clipboard = LocalClipboardManager.current
             val haptics = LocalHapticFeedback.current
+            // 命中词在气泡里逐字高亮：气泡是纯文本，能直接画区间，
+            // 不像 Markdown 那样要钻进行内渲染里。
+            val findStyle = if (findQuery.isBlank()) null else findSpanStyle(findActive)
+            val body = if (findStyle == null) AnnotatedString(text)
+            else buildAnnotatedString { appendFindHighlighted(text, findQuery, findStyle) }
             Box(Modifier.clickable { copyMenu = true }) {
                 androidx.compose.foundation.text.selection.SelectionContainer {
                     Text(
-                        text,
+                        body,
                         modifier = Modifier
                             .widthIn(max = bubbleMaxWidth)
                             .background(
@@ -168,6 +184,8 @@ private fun AssistantRow(
     model: PhoneModel,
     store: SessionStore?,
     onOpenFile: (String) -> Unit,
+    findQuery: String = "",
+    findActive: Boolean = false,
 ) {
     val clipboard = LocalClipboardManager.current
     @Suppress("UNUSED_EXPRESSION")
@@ -186,9 +204,15 @@ private fun AssistantRow(
                         .fillMaxWidth()
                         .padding(vertical = Dimens.messageTopInset)
                 ) {
-                    MarkdownText(block.text, fileMentions = mentions, onOpenFile = onOpenFile)
+                    MarkdownText(
+                        block.text,
+                        fileMentions = mentions,
+                        onOpenFile = onOpenFile,
+                        findQuery = findQuery,
+                        findActive = findActive,
+                    )
                 }
-                is AssistantBlock.Reasoning -> ThinkCard(block.text)
+                is AssistantBlock.Reasoning -> ThinkCard(block.text, findQuery, findActive)
                 is AssistantBlock.Image -> block.attachment?.let { att ->
                     decodeImageRef(att)?.let { AttachmentImage(sessionId, it, model) }
                 }

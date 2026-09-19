@@ -45,6 +45,10 @@ fun CardRow(
     tint: Color = DshChrome.label,
     running: Boolean = false,
     onClick: (() -> Unit)? = null,
+    /** 会话内查找的查询词；命中词在摘要里逐字高亮。 */
+    findQuery: String = "",
+    /** 这一行是否查找栏当前停靠的命中行；是则命中词用深一档的底色。 */
+    findActive: Boolean = false,
 ) {
     Row(
         modifier = modifier
@@ -71,8 +75,13 @@ fun CardRow(
             } else {
                 Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(Dimens.iconSlot))
             }
+            val findStyle = if (findQuery.isBlank()) null else findSpanStyle(findActive)
+            val summaryText = if (findStyle == null) AnnotatedString(summary)
+            else androidx.compose.ui.text.buildAnnotatedString {
+                appendFindHighlighted(summary, findQuery, findStyle)
+            }
             Text(
-                summary,
+                summaryText,
                 style = MaterialTheme.typography.labelMedium,
                 color = tint,
                 maxLines = 1,
@@ -141,13 +150,19 @@ fun CardDetailDialog(
 
 /** 思考卡片：行上只显示第一行，全文在弹层里看。 */
 @Composable
-fun ThinkCard(text: String) {
+fun ThinkCard(text: String, findQuery: String = "", findActive: Boolean = false) {
     var detail by remember { mutableStateOf(false) }
     val summary = remember(text) {
         val line = text.trimStart().substringBefore('\n').trim()
         line.ifEmpty { Strings.thinking }
     }
-    CardRow(Icons.Outlined.Psychology, summary, onClick = { detail = true })
+    CardRow(
+        Icons.Outlined.Psychology,
+        summary,
+        onClick = { detail = true },
+        findQuery = findQuery,
+        findActive = findActive,
+    )
     if (detail) {
         CardDetailDialog(Icons.Outlined.Psychology, Strings.thinking, text, { detail = false }) {
             SelectionText(text)
@@ -348,7 +363,7 @@ fun toolVariantIcon(variant: ToolRowVariant): ImageVector = when (variant) {
 
 /** 工具调用卡片：与思考卡同一种行，点开同一种详情弹层。 */
 @Composable
-fun ToolCard(data: ToolChatData, cwd: String?) {
+fun ToolCard(data: ToolChatData, cwd: String?, findQuery: String = "", findActive: Boolean = false) {
     var detail by remember { mutableStateOf(false) }
     val model = remember(data, cwd) { toolRowModel(data, cwd) }
     val tint = when (model.state) {
@@ -369,6 +384,8 @@ fun ToolCard(data: ToolChatData, cwd: String?) {
         tint = tint,
         running = model.state == ToolRowState.RUNNING,
         onClick = { detail = true },
+        findQuery = findQuery,
+        findActive = findActive,
     )
     if (detail) {
         val title = model.summary.substringBefore('\n').ifEmpty { data.name }

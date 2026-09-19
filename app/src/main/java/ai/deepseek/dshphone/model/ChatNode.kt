@@ -11,6 +11,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -60,6 +61,9 @@ fun encodeContentBlock(block: ContentBlock): JsonElement = when (block) {
     is ContentBlock.ToolResult -> buildJsonObject {
         put("type", "tool-result")
         put("toolCallId", block.toolCallId)
+        // 嵌套正文必须跟着编出去：toolResultText/resultFirstLine 靠这条编码把非文本块
+        // 摊成可复制文本，漏了 content 等于把嵌套工具结果整段丢掉（Mac 同样 encode content）。
+        put("content", buildJsonArray { block.content.forEach { add(encodeContentBlock(it)) } })
         put("isError", block.isError)
     }
     is ContentBlock.Other -> block.raw ?: JsonObject(emptyMap())

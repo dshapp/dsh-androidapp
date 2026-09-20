@@ -434,6 +434,9 @@ class SessionStore(val sessionId: SessionId) {
     fun seedFromCache(window: CachedWindow) {
         if (historyLoaded || eventWindow.entries.isNotEmpty() || window.records.isEmpty()) return
         eventWindow.replace(SessionHistoryValue(window.records, window.hasMore, null))
+        // 底稿自己知道是不是最后一页，这条结论必须跟窗口一起铺上去：留着默认的 true，
+        // 一份完整历史的短会话在 follow 快照回来之前会一直显示「加载更早」并且过程行不折叠。
+        hasMore = eventWindow.hasMore
         replayHistory()
     }
 

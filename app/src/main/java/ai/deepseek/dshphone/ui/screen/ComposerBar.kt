@@ -714,7 +714,9 @@ fun todoColor(status: String): Color = when (status) {
 /** 目标条：有目标才出现，可暂停/恢复、编辑、清除。 */
 @Composable
 private fun GoalBar(model: PhoneModel, sessionId: SessionId, store: SessionStore?) {
-    val goal = store?.goal ?: return
+    // 用 goalBarGoal（= activeGoal）而不是 store.goal 原文：完成态的目标不能画出来，
+    // 否则条上的暂停/编辑/清除会全部静默失效（它们都经 goalRef、而 goalRef 折掉完成态）。
+    val goal = store?.goalBarGoal ?: return
     var menu by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf(false) }
     var objectiveDraft by remember { mutableStateOf("") }

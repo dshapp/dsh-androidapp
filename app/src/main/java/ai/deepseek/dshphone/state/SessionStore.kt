@@ -255,6 +255,16 @@ class SessionStore(val sessionId: SessionId) {
 
     val activeGoal: GoalProjection? get() = goal?.takeIf { it.phase != "complete" }
 
+    /**
+     * 输入区目标条画的目标（[ai.deepseek.dshphone.ui.screen.ComposerBar] 的 GoalBar）。
+     *
+     * 必须与 [goalRef] 用同一条折叠：条上的暂停/编辑/清除都靠 goalRef 解析，而 goalRef
+     * 会把完成态折成空。若条仍画 `goal` 的原文，一条 phase == "complete" 的目标就会画出
+     * 边框与三个按钮、点下去全部静默返回（永远关不掉的死条）。主机在目标完成后保留完整
+     * 快照（`goal/changed` 带 `goal`，只有 clear 才发 null 投影），所以这条折叠必须在这里。
+     */
+    val goalBarGoal: GoalProjection? get() = activeGoal
+
     val goalRef: GoalRef? get() = activeGoal?.let { GoalRef(it.id, it.revision) }
 
     fun projectionValue(key: String): JsonElement? = projections[key]?.first

@@ -79,6 +79,7 @@ fun SessionListScreen(
     onOpenSession: (SessionId) -> Unit,
     onOpenSettings: () -> Unit,
     onNewSession: () -> Unit,
+    onOpenArchived: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -88,7 +89,6 @@ fun SessionListScreen(
     var query by remember { mutableStateOf("") }
     var collapsed by remember { mutableStateOf(setOf<String>()) }
     var pages by remember { mutableStateOf(mapOf<String, Int>()) }
-    var showArchived by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<SessionSummary?>(null) }
     var renameText by remember { mutableStateOf("") }
     var viewMenu by remember { mutableStateOf(false) }
@@ -122,8 +122,18 @@ fun SessionListScreen(
     //   注意只挡 subagent 这一种来源：普通 fork 出来的会话仍是独立会话，照常列出。
     // 名单只在会话清单变化时重建。原来每次重组都新建一个 List，下游以它为 key 的 remember
     // 全部失效——输入一个字就要把 1500 多条会话重新筛一遍、再分组排序一遍。
-    val listed = remember(model.listStore.sessions) {
-        model.listStore.sessions.filter { !it.blank && !it.isSubagentOrigin }
+    // 归档这一道闸必须加在渲染口径里，而不是靠归档时把行从名册摘掉：主机 \`session/list\`
+    // 会把已归档的会话带回来，只摘行的话每次刷新都会重现一次（Mac 边栏同样按
+    // \`archivedSessionIds\` 在渲染时过滤）。两个 store 的归档集合取并集，与归档页同源。
+    val listed = remember(
+        model.listStore.sessions,
+        model.workspaceStore.archivedSessionIds,
+        model.listStore.archivedSessionIds,
+    ) {
+        listSessionsVisible(
+            model.listStore.sessions,
+            (model.workspaceStore.archivedSessionIds + model.listStore.archivedSessionIds).toSet(),
+        )
     }
     val erroredIds = model.sessions.filterValues { it.unreadError }.keys
 
@@ -342,12 +352,6 @@ fun SessionListScreen(
                             ChoiceItem(Strings.orderManual, Icons.Default.DragHandle, orderBy == "manual") {
                                 orderBy = "manual"; persistView(); viewMenu = false
                             }
-                            HorizontalDivider()
-                            DropdownMenuItem(
-                                text = { Text(Strings.archived) },
-                                leadingIcon = { Icon(Icons.Default.Inventory2, null) },
-                                onClick = { viewMenu = false; showArchived = true },
-                            )
                         }
                     }
                     // 加号比「编辑便签」更直白地表示新建。
@@ -359,10 +363,12 @@ fun SessionListScreen(
         }
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
+            // weight 而不是 fillMaxSize：底下那一行归档入口要常驻在可视底部，
+            // 不能被一个吃满高度的兄弟把它挤出屏幕（对齐 Mac 侧栏注释「固定在这一列底部」）。
             PullToRefreshBox(
                 isRefreshing = model.refreshing,
                 onRefresh = { model.pullToRefresh() },
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.weight(1f),
             ) {
                 LazyColumn(Modifier.fillMaxSize(), state = listState) {
                     if (searching) {
@@ -416,12 +422,25 @@ fun SessionListScreen(
                         }
                     }
                 }
-                Box(Modifier.fillMaxSize()) { StatusOverlay(model, searching, query, searchRows.sessions.isEmpty()) }
+                Box(Modifier.fillMaxSize()) {
+                    StatusOverlay(
+                        model, searching, query,
+                        searchEmpty = searchRows.sessions.isEmpty(),
+                        listEmpty = listed.isEmpty(),
+                    )
+                }
             }
+            // 会话列表最下面：归档会话已经在 `listed` 里被滤掉了，这里是它们唯一的入口，
+            // 所以固定在这一列底部（不随列表滚动），而不是折进视图选项菜单——对齐 Mac 侧栏。
+            HorizontalDivider()
+            ListItem(
+                modifier = Modifier.clickable { onOpenArchived() },
+                leadingContent = { Icon(Icons.Default.Inventory2, null) },
+                headlineContent = { Text(Strings.archivedSessions) },
+            )
         }
     }
 
-    if (showArchived) ArchivedSheet(model, { showArchived = false }, onOpenSession)
     renaming?.let { target ->
         AlertDialog(
             onDismissRequest = { renaming = null },
@@ -880,19 +899,22 @@ private fun BoxScope.StatusOverlay(
     searching: Boolean,
     query: String,
     searchEmpty: Boolean,
+    listEmpty: Boolean,
 ) {
     val connection = model.connection
     when {
         // 连不上：顶部全局提示条已经把状态与重试说清楚了，这里不再弹一层居中提示；
         // 只有当列表确实空着时才补一句占位，避免用户对着一片空白猜。
-        connection is Connection.Failed && model.listStore.sessions.isEmpty() ->
+        connection is Connection.Failed && listEmpty ->
             EmptyState(Icons.Default.CloudOff, Strings.offlineBannerTitle, Strings.offlineBannerBody)
-        connection is Connection.Connecting && model.listStore.sessions.isEmpty() ->
+        connection is Connection.Connecting && listEmpty ->
             CircularProgressIndicator(Modifier.align(Alignment.Center))
         // 空状态认合并后的命中：本地名称匹配也算结果，只有两边都没有才算「没搜到」。
         searching && searchEmpty ->
             EmptyState(Icons.Default.SearchOff, Strings.searchNoResults, query)
-        !searching && model.listStore.sessions.isEmpty() && connection is Connection.Connected ->
+        // 认渲染口径（已滤掉归档行）而不是名册本身：名册里还留着已归档会话的摘要，
+        // 只看名册的话「只有已归档会话」的账号会得到一片没有任何说明的空白。
+        !searching && listEmpty && connection is Connection.Connected ->
             EmptyState(Icons.AutoMirrored.Filled.Chat, Strings.noSessions, null)
     }
 }

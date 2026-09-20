@@ -219,6 +219,14 @@ class PhoneModel private constructor(app: Application) {
     /// 列表下拉刷新是否在飞行中。
     var refreshing by mutableStateOf(false)
         private set
+    /**
+     * 正在等 `workspace/unarchiveSession` 答复的会话。
+     *
+     * 归档页据此把该行的按钮换成进度指示，也顺带挡住重复点击；失败时在 `finally`
+     * 里收掉，行保留下来可以重试（对齐 Mac `ArchivedSessionsView` 的 `restoring`）。
+     */
+    var unarchivingIds by mutableStateOf<Set<SessionId>>(emptySet())
+        private set
 
     private var api: ApiClient? = null
     private var coordinator: StreamCoordinator? = null
@@ -309,7 +317,7 @@ class PhoneModel private constructor(app: Application) {
                 allSessions = { sessions.values.toList() },
                 remoteEventHandler = { event -> handleRemoteInvalidation(event) },
                 sessionRemovedHandler = { handleSessionRemoved(it) },
-                sessionsArchivedHandler = { ids -> ids.forEach { handleSessionRemoved(it) } },
+                sessionsArchivedHandler = { ids -> handleSessionsArchived(ids) },
                 resyncHandler = { scope.launch { resyncAfterReconnect() } },
                 gapRepairLoader = { address, throughSeq ->
                     // 补洞不是翻页：只补漏掉的那一小段，窗口大小照翻页口径给即可。
@@ -410,6 +418,27 @@ class PhoneModel private constructor(app: Application) {
         if (selectedSessionId == sessionId) {
             selectedSessionId = null
             lastErrorMessage = Strings.sessionGone
+        }
+    }
+
+    /**
+     * 主机把一批会话推入归档集合（`workspace/follow` 的 `archived` 增量，帧里是完整集合）。
+     *
+     * 与 [handleSessionRemoved] 的区别就是「归档不是删除」：
+     * - 名册行**保留**。归档集合由 Workspace 注册表持有，渲染时过滤；主机 `session/list`
+     *   还会把已归档的会话带回来，删掉行只会在下一次刷新后变成幽灵重现。
+     * - 运行时状态收掉。改动记录是会话存活期间才提供的东西，归档后再打开也不会回填
+     *   （与 Mac 在 `handleSessionsArchived` 里 `turnChanges.closeAll` 同一处动作）；
+     *   缓存里的窗口跟着删，避免归档的会话在下一屏画出过期内容。
+     * - 不写 `lastErrorMessage`：会话还在主机上，说「该会话已在主机上消失」是谎报。
+     */
+    private fun handleSessionsArchived(ids: List<SessionId>) {
+        // 帧里带的是完整集合，把名册侧的镜像也一起对齐：渲染时两个 store 取并集，
+        // 镜像落后于注册表的话会把「已经不归档」的会话继续按归档过滤掉。
+        listStore.archivedSessionIds = ids
+        for (id in ids) {
+            turnChanges.closeAll(id)
+            cache?.let { sessionCache -> scope.launch(Dispatchers.IO) { sessionCache.removeWindow(id) } }
         }
     }
 
@@ -928,12 +957,25 @@ class PhoneModel private constructor(app: Application) {
         }
     }
 
+    /**
+     * 归档一条会话。
+     *
+     * 归档不是删除：主机上这条会话还在，只是被 Workspace 注册表记进了归档集合。所以这里
+     * 只把主机落定后的归档集合写进两个 store（主列表据此在渲染时把它滤掉），**不再**
+     * `listStore.remove`——摘要在名册里留着，归档页才拿得到标题与工作区名（与 Mac
+     * `archiveSession` 先 `handleSessionsArchived` 再 `refreshSessions` 同一口径）。
+     */
     fun archive(sessionId: SessionId) {
         scope.launch {
             try {
-                api?.workspaceArchiveSession(sessionId)
+                val archived = api?.workspaceArchiveSession(sessionId) ?: return@launch
+                workspaceStore.setArchived(archived)
+                // 本地这一次归档掉它的运行时 store：名册行留着给归档页，但没人在看的
+                // 会话流没必要继续挂着（再打开时会重新 `open()` 建回来）。
                 sessions.remove(sessionId)
-                listStore.remove(sessionId)
+                // 传主机返回的完整集合：`handleSessionsArchived` 会把它同步进名册侧镜像，
+                // 只传刚归档的这一条会把别的已归档会话从镜像里挤掉。
+                handleSessionsArchived(archived)
             } catch (e: Exception) {
                 lastErrorMessage = describe(e)
             }
@@ -948,6 +990,8 @@ class PhoneModel private constructor(app: Application) {
      * 而不是看起来像成功了却没动静。
      */
     fun unarchive(sessionId: SessionId) {
+        if (sessionId in unarchivingIds) return
+        unarchivingIds = unarchivingIds + sessionId
         scope.launch {
             try {
                 val archived = api?.workspaceUnarchiveSession(sessionId) ?: return@launch
@@ -956,6 +1000,8 @@ class PhoneModel private constructor(app: Application) {
                 refreshInternal()
             } catch (e: Exception) {
                 lastErrorMessage = describe(e)
+            } finally {
+                unarchivingIds = unarchivingIds - sessionId
             }
         }
     }

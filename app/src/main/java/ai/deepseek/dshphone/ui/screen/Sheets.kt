@@ -12,7 +12,6 @@ import ai.deepseek.dshphone.net.get
 import ai.deepseek.dshphone.net.obj
 import ai.deepseek.dshphone.state.*
 import ai.deepseek.dshphone.ui.component.CardDetailDialog
-import ai.deepseek.dshphone.ui.component.EmptyStateColumn
 import ai.deepseek.dshphone.ui.component.MarkdownText
 import ai.deepseek.dshphone.ui.component.MonospaceBlock
 import ai.deepseek.dshphone.ui.theme.Dimens
@@ -429,42 +428,6 @@ internal fun LabeledRow(label: String, value: String) {
         Text(value, style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-}
-
-// —— 已归档 ————————————————————————————————————————————————
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ArchivedSheet(model: PhoneModel, onDismiss: () -> Unit, onOpen: (SessionId) -> Unit) {
-    val ids = remember(model.workspaceStore.archivedSessionIds, model.listStore.archivedSessionIds) {
-        (model.workspaceStore.archivedSessionIds + model.listStore.archivedSessionIds).distinct().sorted()
-    }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Box(Modifier.fillMaxWidth().heightIn(min = 200.dp, max = 560.dp)) {
-            if (ids.isEmpty()) {
-                EmptyStateColumn(Icons.Default.Inventory2, Strings.noArchived, null)
-            } else {
-                LazyColumn(Modifier.fillMaxWidth()) {
-                    items(ids, key = { it }) { id ->
-                        ListItem(
-                            modifier = Modifier.clickable { onDismiss(); onOpen(id) },
-                            headlineContent = {
-                                Text(
-                                    model.listStore.sessionsById[id]?.let { sessionDisplayTitle(it, null) } ?: id,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                )
-                            },
-                            // 恢复入口（0.1.6 的 workspace/unarchiveSession）：归档时本地把它从列表里
-                            // 摘掉了，只靠点击是打不开的，得先让主机把它放回来。
-                            trailingContent = {
-                                TextButton(onClick = { model.unarchive(id) }) { Text(Strings.restore) }
-                            },
-                        )
-                    }
-                }
-            }
-        }
     }
 }
 

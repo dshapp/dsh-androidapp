@@ -320,7 +320,12 @@ class StreamCoordinator(
 
     private fun handleWorkspace(frame: WorkspaceFollowFrame) {
         when (frame) {
-            is WorkspaceFollowFrame.Baseline -> workspaceStore.setWorkspaces(frame.items, frame.archivedSessionIds)
+            is WorkspaceFollowFrame.Baseline -> {
+                workspaceStore.setWorkspaces(frame.items, frame.archivedSessionIds)
+                // 冷启动/重连的基线也要把名册侧的归档镜像对齐，否则上一次连接留下的
+                // 归档集合会继续影响主列表的渲染过滤（见 PhoneModel.handleSessionsArchived）。
+                listStore.archivedSessionIds = frame.archivedSessionIds
+            }
             is WorkspaceFollowFrame.Upsert -> workspaceStore.upsert(frame.workspace)
             is WorkspaceFollowFrame.Remove -> workspaceStore.remove(frame.workspaceId)
             is WorkspaceFollowFrame.Order -> workspaceStore.applyOrder(frame.workspaceIds)

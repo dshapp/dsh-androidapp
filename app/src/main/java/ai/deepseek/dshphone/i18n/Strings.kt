@@ -164,6 +164,20 @@ object Strings {
     val archived: String get() = pick("Archived", "已归档")
     val noArchived: String get() = pick("No archived sessions", "没有已归档会话")
     val restore: String get() = pick("Restore", "恢复")
+    /** 列表底部入口与归档页标题（对齐 Mac 的 archivedSessions）。 */
+    val archivedSessions: String get() = pick("Archived sessions", "已归档会话")
+    /** 归档页搜索框的占位（对齐 Mac 的 searchArchivedSessions）。 */
+    val searchArchivedSessions: String get() = pick("Search archived sessions", "搜索已归档会话")
+    /** 归档集合非空、但没有任何一条能解析出会话摘要时的空态（对齐 Mac 的 unavailableArchivedSessions）。 */
+    val unavailableArchivedSessions: String get() =
+        pick("No archived session here can be restored.", "这里没有可恢复的已归档会话。")
+    /**
+     * 每行的取消归档动作。点名「归档状态」而不是通用的「恢复」，与底部入口同一个词根；
+     * 对齐 Mac 把侧栏入口与行内动作统一为 unarchive 的做法。
+     */
+    val unarchiveSession: String get() = pick("Unarchive", "取消归档")
+    /** 同上动作的无障碍标签，%s 是被操作那一行的标题（对齐 Mac 的 unarchiveSessionNamed）。 */
+    val unarchiveSessionNamed: String get() = pick("Unarchive %s", "取消归档 %s")
     // 改动文件卡片（0.1.6 ui-deliverables）：内容与主机 workspace-changes 插件一一对应。
     val changedFilesTitle: String get() = pick("%d files changed", "本轮改动 %d 个文件")
     val changedFilesShowAll: String get() = pick("Show all %d", "展开全部 %d 个")

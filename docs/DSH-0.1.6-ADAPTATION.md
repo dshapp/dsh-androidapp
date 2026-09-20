@@ -121,15 +121,26 @@ Mac 侧：`workspace/changes` 事件只带 `turn`，再按该事件的 `seq` 去
 ### P1-2 归档会话恢复（`workspace/unarchiveSession`）
 
 Mac 侧：新增 `workspace/unarchiveSession` RPC；手机端归档列表（iOS 的 `PhoneArchivedView`）补了滑动恢复，
-`PhoneModel.unarchive` 恢复后重拉列表。
+`PhoneModel.unarchive` 恢复后重拉列表。桌面端另有独立窗口 `ArchivedSessionsView`：按标题/工作区名搜索、
+每行一个取消归档、三种空态。
 
-安卓侧现状：只能看和打开，**不能恢复**。
+安卓侧现状：RPC 与行内「恢复」已接好（`net/RpcMethods.kt` 的 `workspaceUnarchiveSession`、
+`state/PhoneModel.kt` 的 `unarchive`），但入口只是视图选项菜单里的底部弹层 `ArchivedSheet`：
+无搜索、拿标题要退回 sessionId 兜底，而且归档时 `PhoneModel.archive` 直接 `listStore.remove`，
+主机 `session/list` 带回来的归档会话会在刷新后重新冒回主列表。
 
-- `app/src/main/java/ai/deepseek/dshphone/ui/screen/Sheets.kt:438-465` `ArchivedSheet` 只有 `onOpen`。
-- `net/RpcMethods.kt:218-220` 只有 `workspace/archiveSession`；`state/PhoneModel.kt:836-841` 只有 `archive`。
+改法：底部入口 + 独立页。
 
-改法：加 `workspace/unarchiveSession`（返回同一形状的 `{ archivedSessionIds }`），在 `ArchivedSheet` 行上加大
-`SwipeToDismissBox` 恢复动作（对应 Mac 的 `.swipeActions`），成功后刷新列表并应用返回的归档集合。
+- `ui/screen/SessionListScreen.kt`：底部固定一行「已归档会话」入口（`onOpenArchived`）；
+  视图菜单里的归档项与 `ArchivedSheet` 删除。主列表改用 `listSessionsVisible`，在渲染时
+  过滤归档 id（`model/ArchivedSessions.kt`）。
+- `ui/screen/ArchivedSessionsScreen.kt`（新）：独立导航页，标题栏搜索、行内取消归档、
+  三种空态（归档为空 / 归档非空但摘要已不存在 / 查询无匹配），失败走 snackbar。
+- `ui/App.kt`：新增 `composable("archived")` 路由。
+- `net/RpcMethods.kt`：`workspaceArchiveSession` 改为返回 `{ archivedSessionIds }`；
+  `state/PhoneModel.kt` 的 `archive` 应用返回集合、保留名册摘要，`unarchive` 记录
+  `unarchivingIds` 做行内进度与防重复点击。
+
 该 RPC 也是标准 RPC，bridge 直接放行。
 
 ---
@@ -163,7 +174,7 @@ Mac 侧：新增 `workspace/unarchiveSession` RPC；手机端归档列表（iOS 
 | P1 | changes GET 助手 + 模型 | `net/ApiClient.kt`、`model/` | 上一条 |
 | P1 | 变更卡片 UI 挂 turn tail | `ui/component/MessageRow.kt` | 上一条 |
 | P1 | bridge allowlist 放行 changes 路由 | `dsh-mobile-bridge/src/http.ts` 或 `cordis.patch.yml` 的 `apiAllowlist` | — |
-| P1 | `workspace/unarchiveSession` + 归档页恢复 | `net/RpcMethods.kt`、`state/PhoneModel.kt`、`ui/screen/Sheets.kt` | — |
+| P1 | `workspace/unarchiveSession` + 归档页恢复 | `net/RpcMethods.kt`、`state/PhoneModel.kt`、`model/ArchivedSessions.kt`、`ui/screen/SessionListScreen.kt`、`ui/screen/ArchivedSessionsScreen.kt`、`ui/App.kt` | — |
 
 ## 六、验收清单
 
@@ -172,5 +183,5 @@ Mac 侧：新增 `workspace/unarchiveSession` RPC；手机端归档列表（iOS 
 3. 0.1.5 主机：以上两项**不回归**（投影内联 options 与 control queue 路径仍生效）。
 4. 0.1.6 主机：一轮改动文件后，turn tail 出现变更卡片，展开可见增删行数，点开可见 diff；
    无改动的一轮不出现卡片。
-5. 0.1.6 主机：归档列表可恢复，恢复后回到会话列表。
+5. 0.1.6 主机：会话列表底部的「已归档会话」入口进入独立页，可按标题/工作区名搜索；行内取消归档后该行下线、会话回到会话列表，且归档会话不再因刷新冒回主列表。
 6. 反向确认：0.1.6 的 `workspace/changes` / `image/offload` 不会在转写里画成未知 JSON 卡片。

@@ -5,6 +5,7 @@ import ai.deepseek.dshphone.state.Connection
 import ai.deepseek.dshphone.state.PhoneModel
 import ai.deepseek.dshphone.state.PairingPayload
 import ai.deepseek.dshphone.ui.component.ConnectionBanner
+import ai.deepseek.dshphone.ui.screen.ArchivedSessionsScreen
 import ai.deepseek.dshphone.ui.screen.ChatScreen
 import ai.deepseek.dshphone.ui.screen.NewSessionScreen
 import ai.deepseek.dshphone.ui.screen.OnboardingScreen
@@ -79,8 +80,17 @@ fun DshApp(model: PhoneModel, launch: LaunchRequest?, onLaunchHandled: () -> Uni
                         onOpenSession = { navController.navigate("chat/$it") },
                         onOpenSettings = { navController.navigate("settings") },
                         onNewSession = { navController.navigate("new") },
+                        onOpenArchived = { navController.navigate("archived") },
                     )
                 }
+            }
+            composable("archived") {
+                ArchivedSessionsScreen(
+                    model = model,
+                    onBack = { navController.popBackStack() },
+                    // 打开归档里的会话走同一个会话页；返回键依次回到归档页、会话列表。
+                    onOpenSession = { navController.navigate("chat/$it") },
+                )
             }
             composable("settings") {
                 SettingsScreen(

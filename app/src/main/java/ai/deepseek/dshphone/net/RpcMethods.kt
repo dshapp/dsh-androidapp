@@ -220,9 +220,16 @@ suspend fun ApiClient.sessionAttachment(sessionId: SessionId, attachmentId: Atta
     call("session/attachment", request { put("sessionId", sessionId); put("attachmentId", attachmentId) })
         .decodeOrNull<SessionAttachmentValue>() ?: throw internalError("attachment unavailable")
 
-suspend fun ApiClient.workspaceArchiveSession(sessionId: SessionId) {
+/**
+ * 归档一条会话；返回主机落定后的完整归档集合。
+ *
+ * 主机一直返回 `{ archivedSessionIds }`，只是本地实现早先丢弃了它。返回值让调用方
+ * 能立刻把归档集合落进 WorkspaceStore / SessionListStore，不必等下一次
+ * `workspace/follow` 帧——与 [workspaceUnarchiveSession] 同一形状。
+ */
+suspend fun ApiClient.workspaceArchiveSession(sessionId: SessionId): List<SessionId> =
     call("workspace/archiveSession", request { put("sessionId", sessionId) })
-}
+        .let { value -> (value["archivedSessionIds"].arr ?: emptyList()).mapNotNull { it.str } }
 
 // —— 每轮改动文件（0.1.6 的 ui-deliverables 路由） —————————————————
 

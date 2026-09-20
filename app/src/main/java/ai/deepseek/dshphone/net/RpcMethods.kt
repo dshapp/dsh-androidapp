@@ -29,6 +29,7 @@ import ai.deepseek.dshphone.model.SubagentAddress
 import ai.deepseek.dshphone.model.SubagentListEntry
 import ai.deepseek.dshphone.model.SubagentListValue
 import ai.deepseek.dshphone.model.SubagentMode
+import ai.deepseek.dshphone.model.WorkspaceFileBytesValue
 import ai.deepseek.dshphone.model.WorkspaceFileTextValue
 import ai.deepseek.dshphone.model.WorkspaceOrderValue
 import kotlinx.serialization.json.JsonArray
@@ -282,6 +283,26 @@ suspend fun ApiClient.workspaceFileRead(sessionId: SessionId, path: String, offs
             put("range", buildJsonObject { put("offset", offset) })
         },
     ).decodeOrNull<WorkspaceFileTextValue>() ?: throw internalError("file read failed")
+
+/**
+ * 读回一个工作区文件的字节窗口（base64），用于把图片交给系统查看器。
+ * 主机 readBytes 的单窗口上限默认 2 MiB，靠 [WorkspaceFileBytesValue.eof] 分片读完，
+ * 避免为了打开一张图一次拉回整份文件（readAll 上限 32 MiB，base64 后还要再涨三分之一）。
+ */
+suspend fun ApiClient.workspaceFileReadBytes(
+    sessionId: SessionId,
+    path: String,
+    offset: Int,
+    length: Int,
+): WorkspaceFileBytesValue =
+    call(
+        "workspaceFiles/readBytes",
+        buildJsonObject {
+            put("workspaceFileScopeId", sessionId)
+            put("path", path)
+            put("range", buildJsonObject { put("offset", offset); put("length", length) })
+        },
+    ).decodeOrNull<WorkspaceFileBytesValue>() ?: throw internalError("file read failed")
 
 // —— commands / skills ————————————————————————————————————————
 

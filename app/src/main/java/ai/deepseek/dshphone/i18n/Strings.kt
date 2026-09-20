@@ -217,6 +217,8 @@ object Strings {
     val fileLoading: String get() = pick("Loading file…", "正在加载文件…")
     val fileEmpty: String get() = pick("This file is empty", "这个文件是空的")
     val fileUnavailable: String get() = pick("Couldn’t open this file", "无法打开此文件")
+    /** 图片链接：取回失败，或系统里没有能看图片的应用（与附件图的 imageUnavailable 不同）。 */
+    val imageOpenFailed: String get() = pick("Couldn’t open this image", "无法打开这张图片")
     val cancel: String get() = pick("Cancel", "取消")
     val done: String get() = pick("Done", "完成")
     val close: String get() = pick("Close", "关闭")

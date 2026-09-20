@@ -88,6 +88,49 @@ data class TriggerToken(val kind: Kind, val query: String, val start: Int, val e
  *
  * `get` 只由 [DshApplication] 持有实例，是这条替换唯一的入口。
  */
+/** 与主机 workspaceFiles 的 maxBytes 默认值一致；超过会被拒，不会被截短。 */
+internal const val CHUNK_BYTES = 2 * 1024 * 1024
+
+/**
+ * 按 [CHUNK_BYTES] 分片把一个工作区文件写进 [out]，返回写入的字节数。
+ *
+ * 分片而不是一次读完，是因为主机 readAll 最多能给到 32 MiB，base64 之后更大，
+ * 解成字节时两份同时在内存里，低端机容易 OOM；分片读则只有当前这一片在内存里。
+ *
+ * 三条退出规则，任何一条不满足就抛错，交给调用方去提示：
+ *  · 第一片带回的 [WorkspaceFileBytesValue.bytes] 就超过 [limit]，直接放弃，不白下一遍；
+ *  · 累计写入超过 [limit]，停在超限那一刻（调用方负责删掉半截文件）；
+ *  · [WorkspaceFileBytesValue.eof] 为假却给回空片，说明主机没有推进，再循环就是死转。
+ *
+ * 只做字节搬运，不碰网络：[fetch] 由调用方提供，测试里可以直接喂假数据。
+ */
+internal suspend fun copyWorkspaceFileChunked(
+    out: java.io.OutputStream,
+    limit: Long,
+    fetch: suspend (offset: Int, length: Int) -> WorkspaceFileBytesValue,
+): Long {
+    var offset = 0
+    var written = 0L
+    while (true) {
+        val window = fetch(offset, CHUNK_BYTES)
+        if (written == 0L && window.bytes.toLong() > limit) {
+            throw internalError("file is too large to open")
+        }
+        // minSdk 26 起 java.util.Base64 可用；这里不用 android.util.Base64，
+        // 一是纯 JVM 可测，二是 MIME 解码器的宽容度与 android DEFAULT 一致。
+        val chunk = java.util.Base64.getMimeDecoder().decode(window.data)
+        if (chunk.isNotEmpty()) {
+            out.write(chunk)
+            written += chunk.size
+        }
+        if (written > limit) throw internalError("file is too large to open")
+        if (window.eof) break
+        if (chunk.isEmpty()) throw internalError("file read stalled")
+        offset += chunk.size
+    }
+    return written
+}
+
 class PhoneModel private constructor(app: Application) {
 
     private val appContext = app.applicationContext
@@ -1210,6 +1253,31 @@ class PhoneModel private constructor(app: Application) {
     suspend fun workspaceFilePage(sessionId: SessionId, path: String, offset: Int): WorkspaceFileTextValue {
         val client = api ?: throw internalError(Strings.disconnected)
         return client.workspaceFileRead(sessionId, path, offset)
+    }
+
+    /**
+     * 把一个工作区文件读进 [target]（图片交给系统查看器之前先落地）。
+     *
+     * 按窗口分片读、拿到一片就立刻写盘，所以峰值内存只有一片而不是整份文件：
+     * 主机 readBytes 单窗口默认 2 MiB，readAll 虽然能一次给到 32 MiB，但 base64
+     * 之后再解成字节会同时占掉两份，低端机容易直接 OOM。返回写着文件内容的临时文件，
+     * 调用方负责用完删除；任何一片失败都抛出，由调用方决定怎么提示。
+     */
+    suspend fun workspaceFileBytes(
+        sessionId: SessionId,
+        path: String,
+        target: File,
+        limit: Long,
+    ): Long {
+        val client = api ?: throw internalError(Strings.disconnected)
+        return withContext(Dispatchers.IO) {
+            // outputStream 会截断，所以整个循环共用一个，不能每片开一次。
+            target.outputStream().buffered().use { out ->
+                copyWorkspaceFileChunked(out, limit) { offset, length ->
+                    client.workspaceFileReadBytes(sessionId, path, offset, length)
+                }
+            }
+        }
     }
 
     suspend fun attachmentImage(sessionId: SessionId, ref: ImageAttachmentRef): Bitmap? {

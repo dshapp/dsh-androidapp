@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import ai.deepseek.dshphone.i18n.Strings
 import ai.deepseek.dshphone.model.FileLink
+import ai.deepseek.dshphone.model.ImageFileType
 import ai.deepseek.dshphone.model.TurnDeliverables
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -94,16 +95,20 @@ import org.commonmark.node.Text as MdText
 import org.commonmark.node.ThematicBreak
 import org.commonmark.parser.Parser
 
-private val markdownParser: Parser = Parser.builder()
-    .extensions(listOf(TablesExtension.create(), StrikethroughExtension.create()))
-    .build()
+private val markdownParser: Parser = GfmAutolink.install(
+    Parser.builder().extensions(listOf(TablesExtension.create(), StrikethroughExtension.create()))
+).build()
 
 /** 解析结果：文档 + 任务项勾选态（方括号那个复选标记在解析期就摘掉）。 */
 private class MarkdownDoc(val document: Document, val tasks: Map<ListItem, Boolean>)
 
 private val taskMarker = Regex("""^\[([ xX])]\s+""")
 
-private fun parseMarkdown(text: String): MarkdownDoc {
+/** U+FEFF：micromark 在 preprocess 阶段会摘掉文档开头这一个字符，这里对齐同一行为。 */
+private const val BOM = '﻿'
+
+private fun parseMarkdown(raw: String): MarkdownDoc {
+    val text = if (raw.startsWith(BOM)) raw.substring(1) else raw
     val document = markdownParser.parse(text) as Document
     val tasks = java.util.IdentityHashMap<ListItem, Boolean>()
     fun scan(start: Node?) {
@@ -621,9 +626,9 @@ private fun inlineText(parent: Node, scope: MarkdownScope): AnnotatedString = bu
                 is Link -> {
                     // 工作区文件（相对路径、绝对路径、file://、dsh-resource://file/…）
                     // 不是浏览器地址：Web 用 dsh-resource 地址在右侧栏打开，手机端在这里
-                    // 转成"读回来交给系统查看器"。其余地址（http/https/mailto/…）
-                    // 仍交给系统，由 LinkAnnotation.Url 处理。
-                    val file = FileLink.parse(current.destination)
+                    // 转成"读回来交给内置预览"。
+                    val destination = current.destination
+                    val file = FileLink.parse(destination)
                     if (file != null && scope.onOpenLink != null) {
                         pushLink(
                             LinkAnnotation.Clickable("file-link", TextLinkStyles(linkStyle)) {
@@ -632,14 +637,36 @@ private fun inlineText(parent: Node, scope: MarkdownScope): AnnotatedString = bu
                         )
                         walk(current.firstChild)
                         pop()
-                    } else {
-                        pushLink(LinkAnnotation.Url(current.destination, TextLinkStyles(linkStyle)))
+                    } else if (GfmAutolink.isSafeExternalUrl(destination)) {
+                        // http/https/mailto：交给系统默认浏览器/邮件客户端（ACTION_VIEW），
+                        // 不内置 WebView、不用 Custom Tabs。LinkAnnotation.Url 不带监听器时
+                        // 走 LocalUriHandler.openUri。
+                        pushLink(LinkAnnotation.Url(destination, TextLinkStyles(linkStyle)))
                         walk(current.firstChild)
                         pop()
+                    } else {
+                        // 未知或危险协议：按纯文本渲染（对齐 Web 端 sanitizeUrl 返回空串）。
+                        walk(current.firstChild)
                     }
                 }
-                is Image -> withStyleSpan(SpanStyle(fontStyle = FontStyle.Italic, color = muted)) {
-                    walk(current.firstChild)
+                is Image -> {
+                    // 图片语法 ![alt](shot.png)：目的地是图片文件时，和文件链接一样点开
+                    // 系统图片查看器——绝不用文本（alt）去冒充图片。其余情况保持原来的
+                    // 斜体弱化渲染，不猜、不乱点。
+                    val file = FileLink.parse(current.destination)
+                    if (file != null && scope.onOpenLink != null && ImageFileType.isImage(file.path)) {
+                        pushLink(
+                            LinkAnnotation.Clickable("image-link", TextLinkStyles(linkStyle)) {
+                                scope.onOpenLink?.invoke(file)
+                            }
+                        )
+                        withStyleSpan(SpanStyle(fontStyle = FontStyle.Italic)) { walk(current.firstChild) }
+                        pop()
+                    } else {
+                        withStyleSpan(SpanStyle(fontStyle = FontStyle.Italic, color = muted)) {
+                            walk(current.firstChild)
+                        }
+                    }
                 }
                 // 模型写的单换行就是想换行（同 GitHub 评论与主流聊天端），不并成一行。
                 is SoftLineBreak -> append("\n")

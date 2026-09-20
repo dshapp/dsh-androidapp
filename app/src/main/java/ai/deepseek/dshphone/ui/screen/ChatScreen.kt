@@ -8,6 +8,7 @@ import ai.deepseek.dshphone.state.PhoneModel
 import ai.deepseek.dshphone.ui.component.DshFind
 import ai.deepseek.dshphone.ui.component.EmptyStateColumn
 import ai.deepseek.dshphone.ui.component.MessageRow
+import ai.deepseek.dshphone.ui.component.SystemImageViewer
 import ai.deepseek.dshphone.ui.theme.Dimens
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
@@ -34,6 +35,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.AnnotatedString
@@ -79,10 +81,29 @@ fun ChatScreen(
     val findFocus = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
 
-    // 文件链接（行内产物提及与 Markdown 链接）都走这一条：直接用应用内的只读预览
-    // 弹层（与系统提示卡片等详情弹层同一种壳），不在别处打开、也不先弹一次提示。
+    // 文件链接（行内产物提及与 Markdown 链接）都走这一条：
+    //  · 图片（png/jpg/svg/…，与 Web 端 classifyFileType 同一组扩展名）交给系统自带的
+    //    图片查看器（ACTION_VIEW + content://），绝不用文本去渲染图片；
+    //  · 其余文件走应用内的只读预览弹层（与系统提示卡片等详情弹层同一种壳），
+    //    不在别处打开、也不先弹一次提示。
+    val context = LocalContext.current
     fun openFileLink(target: FileLinkTarget) {
-        preview = target
+        val path = target.path
+        if (!ImageFileType.isImage(path)) {
+            preview = target
+            return
+        }
+        scope.launch {
+            // 先分片落到缓存文件再打开：内存里只有当前这一片，不会为了看一张图
+            // 把整份文件（readAll 上限 32 MiB，base64 后更大）一次性攥在手里。
+            val file = SystemImageViewer.stageFile(context, path)
+            val staged = runCatching {
+                model.workspaceFileBytes(target.sessionId ?: sessionId, path, file, SystemImageViewer.MAX_BYTES)
+            }.isSuccess
+            if (!staged) file.delete()
+            val opened = staged && SystemImageViewer.open(context, path, file)
+            if (!opened) snackbarHost.showSnackbar(Strings.imageOpenFailed)
+        }
     }
 
     // 退出查找统一走这里：先收键盘再拆输入框，避免软键盘留在屏幕上空占半屏。

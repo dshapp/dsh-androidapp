@@ -41,5 +41,16 @@
             android:name=".AgentExecutionService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <!-- 聊天记录里的图片交给系统图片查看器：先把字节写进 cacheDir/shared-images，
+             再用 content:// 地址送出去（不暴露应用其它私有数据）。 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

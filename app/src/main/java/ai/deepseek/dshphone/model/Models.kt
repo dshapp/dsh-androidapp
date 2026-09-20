@@ -271,6 +271,17 @@ data class WorkspaceFileTextValue(
     val eof: Boolean = true,
 )
 
+/** [workspaceFiles/readAll] 的返回值：整份文件的 base64 内容，用于交给系统图片查看器。 */
+@Serializable
+data class WorkspaceFileBytesValue(
+    val absolutePath: String = "",
+    val version: String = "",
+    val bytes: Int = 0,
+    val offset: Int = 0,
+    val data: String = "",
+    val eof: Boolean = true,
+)
+
 // 工作区 ————————————————————————————————————————————————————————
 
 @Serializable

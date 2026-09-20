@@ -791,18 +791,33 @@ class SessionStore(val sessionId: SessionId) {
             meta = data["meta"],
             resultView = if (view?.target == "result") view.view else null,
         )
-        val key = "tool-call:$wrappedCallId"
-        val existing = contexts[key] as? NodeContext.Tool
-        if (existing != null) {
+        // callId 为空时要能接回那条调用。调用那端在 callId 为空时把键写成
+        // `seq-<seq>`（见 applyToolCall），所以结果这端不能拿空串去查——那样既接不上
+        // 真正的调用（它永远停在"没有结果"），又会在 `tool-call:` 这把键上反复互相
+        // 覆盖，最后只剩一条孤儿行。对齐 Mac：挑最近一条还没有结果的工具调用接上去。
+        val key = if (wrappedCallId.isEmpty()) {
+            contexts.entries
+                .mapNotNull { (k, v) -> (v as? NodeContext.Tool)?.let { k to it.data } }
+                .filter { it.second.result == null }
+                .maxByOrNull { it.second.startSeq }
+                ?.first
+        } else {
+            "tool-call:$wrappedCallId"
+        }
+        val existing = key?.let { contexts[it] as? NodeContext.Tool }
+        if (existing != null && key != null) {
             val updated = existing.data.copy()
             updated.result = result
             if (view?.target == "call") updated.callView = view.view
             contexts[key] = NodeContext.Tool(updated)
             return
         }
-        contexts[key] = NodeContext.Tool(
+        // 一条都接不上时才另起一行；id 必须唯一（Mac 用 `orphan-<seq>`），否则多条
+        // 孤儿结果会挤在同一把键上，只剩最后一条可见。
+        val orphanId = wrappedCallId.ifEmpty { "orphan-" + event.seq }
+        contexts["tool-call:$orphanId"] = NodeContext.Tool(
             ToolChatData(
-                callId = wrappedCallId,
+                callId = orphanId,
                 name = "orphan-result",
                 argsRaw = "",
                 turn = data["turn"].int ?: 0,

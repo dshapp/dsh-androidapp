@@ -460,6 +460,11 @@ class StreamCoordinator(
         if (event.type == "turn/start") listStore.setRunning(sessionId, true)
         else if (event.type == "turn/end") listStore.setRunning(sessionId, false)
         sessionActivityTimestamp(event)?.let { listStore.recordActivity(sessionId, it) }
+        // 失败 peek 搭在这一帧上，所以要在下面折叠/丢帧之前发出：正是用户切走的
+        // 那条会话，它的失败最需要一张通知卡（与 Mac applyLiveEvent 同一顺序）。
+        liveTurnFailureMessage(event)?.let { message ->
+            attentionHandler(AttentionSignal.Failed(sessionId, message))
+        }
         val store = sessionUpsert(sessionId)
         if (store.historyLoaded && event.seq > store.lastSeq + 1) {
             val generation = store.beginGapRepair(entry)

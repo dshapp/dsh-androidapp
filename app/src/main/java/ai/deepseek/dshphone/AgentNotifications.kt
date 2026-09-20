@@ -3,6 +3,7 @@ package ai.deepseek.dshphone
 import ai.deepseek.dshphone.i18n.Strings
 import ai.deepseek.dshphone.model.isSubagentOrigin
 import ai.deepseek.dshphone.model.sessionDisplayTitle
+import ai.deepseek.dshphone.model.turnFailureNotificationBody
 import ai.deepseek.dshphone.state.AttentionSignal
 import ai.deepseek.dshphone.state.PhoneModel
 import ai.deepseek.dshphone.state.TurnCardState
@@ -59,7 +60,9 @@ class AgentNotifications(private val context: Context) {
                 // "这一轮已完成"把失败顶掉（提交前用同一个通知 id，用户只看得到好消息）。
                 cards.fail(signal.sessionId)
                 if (!model.isOnScreen(signal.sessionId)) {
-                    post(model, signal.sessionId, Strings.notifyFailed)
+                    // 卡片的正文是主机给出的失败原因（对齐 Mac failureBody）；
+                    // 固定写死一句"这一轮失败"会把"为什么挂"整条丢掉。
+                    post(model, signal.sessionId, turnFailureNotificationBody(signal.message))
                 }
             }
             is AttentionSignal.ApprovalRequested -> {

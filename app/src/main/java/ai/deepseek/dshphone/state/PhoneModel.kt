@@ -146,6 +146,15 @@ class PhoneModel private constructor(app: Application) {
     var lastErrorMessage by mutableStateOf<String?>(null)
     var agentPresets by mutableStateOf<List<AgentPresetEntry>>(emptyList())
         private set
+    /**
+     * 主机是否允许新会话选择 Agent 模式（`agentPresets/list` 的 `modeSelectionEnabled`）。
+     *
+     * 关掉时新会话统一走部署默认模式：Web 收起选择器并清掉暂存的选择，Mac/iOS 的
+     * `agentPresetPickerEnabled` 也不给入口。主机侧 `agentPresets/select` 并不校验这个
+     * 策略，所以摆出选择器不只是多一个入口，而是真的能把预设选上去、绕过部署的默认边界。
+     */
+    var agentPresetPickerEnabled by mutableStateOf(true)
+        private set
     /** 进程级权限目录（0.1.6）；0.1.5 主机上始终是空的，各 store 退回投影内联的候选。 */
     var permissionCatalog by mutableStateOf<List<PermissionPresetOption>>(emptyList())
         private set
@@ -1105,7 +1114,9 @@ class PhoneModel private constructor(app: Application) {
     }
 
     suspend fun loadAgentPresets() {
-        runCatching { api?.agentPresetList()?.presets }.getOrNull()?.let { agentPresets = it }
+        val roster = runCatching { api?.agentPresetList()?.toRoster() }.getOrNull() ?: return
+        agentPresets = roster.presets
+        agentPresetPickerEnabled = roster.pickerEnabled
     }
 
     /**

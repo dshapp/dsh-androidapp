@@ -94,11 +94,15 @@ fun NewSessionScreen(model: PhoneModel, onBack: () -> Unit, onCreated: (SessionI
                                 label = { Text(workspaceTitle, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                                 leadingIcon = { Icon(Icons.Default.Folder, null, Modifier.size(16.dp)) },
                             )
-                            AssistChip(
-                                onClick = { pickingPreset = true },
-                                label = { Text(presetTitle, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                leadingIcon = { Icon(Icons.Default.Layers, null, Modifier.size(16.dp)) },
-                            )
+                            // 主机关闭 Agent 模式选择时不给入口：新会话统一走部署默认模式
+                            // （对齐 Mac/iOS `agentPresetPickerEnabled` 与 web `showPicker`）。
+                            if (model.agentPresetPickerEnabled) {
+                                AssistChip(
+                                    onClick = { pickingPreset = true },
+                                    label = { Text(presetTitle, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                    leadingIcon = { Icon(Icons.Default.Layers, null, Modifier.size(16.dp)) },
+                                )
+                            }
                         }
                     },
                     onSubmitted = { created ->

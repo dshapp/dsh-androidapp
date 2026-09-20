@@ -304,6 +304,11 @@ data class AgentPresetListValue(
     val presets: List<AgentPresetEntry> = emptyList(),
     val authorable: Boolean = false,
     val hasDocument: Boolean = false,
+    /**
+     * 主机是否允许新会话选择 Agent 模式。0.1.6 之前的主机不发布该字段，
+     * 默认 true（与 Mac `AgentPresetListValue.modeSelectionEnabled` 同一口径）。
+     */
+    val modeSelectionEnabled: Boolean = true,
 )
 
 // 命令与 skills ————————————————————————————————————————————————

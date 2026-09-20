@@ -881,6 +881,14 @@ private fun PlanReviewSheet(
 
 // —— 文件预览 ————————————————————————————————————————————————
 
+/**
+ * 转写里点文件链接后的唯一落地：应用内的只读纯文本预览。
+ *
+ * 弹层用与系统提示卡片等详情卡同一种壳（[ai.deepseek.dshphone.ui.component.CardDetailDialog]）：
+ * 标题是文件名，正文是等宽纯文本，右上角复制、左上角关闭。点击后弹层立刻出现，
+ * 内容按[workspaceFiles/read]分页读，读的过程中在弹层内部转圈——不先弹"正在打开"
+ * 之类的提示，也不把文件交给系统查看器或别的 App。
+ */
 @Composable
 fun FilePreviewSheet(model: PhoneModel, sessionId: SessionId, path: String, onDismiss: () -> Unit) {
     var text by remember(path) { mutableStateOf("") }
@@ -889,6 +897,10 @@ fun FilePreviewSheet(model: PhoneModel, sessionId: SessionId, path: String, onDi
     var eof by remember(path) { mutableStateOf(false) }
     var loading by remember(path) { mutableStateOf(false) }
     var failure by remember(path) { mutableStateOf<String?>(null) }
+    // 首屏这一趟有没有回来过（不论成功还是失败）。打开弹层要立刻转圈，而
+    // LaunchedEffect 起跑前 loading 还是 false：只认 loading 会在弹层弹出后
+    // 先闪一下"这个文件是空的"，所以用这个标记把"还没回来"和"回来发现是空文件"分开。
+    var settled by remember(path) { mutableStateOf(false) }
 
     suspend fun loadNextPage() {
         if (loading || eof) return
@@ -914,6 +926,7 @@ fun FilePreviewSheet(model: PhoneModel, sessionId: SessionId, path: String, onDi
             failure = PhoneModel.describe(e)
         } finally {
             loading = false
+            settled = true
         }
     }
 
@@ -929,12 +942,14 @@ fun FilePreviewSheet(model: PhoneModel, sessionId: SessionId, path: String, onDi
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 TextButton(onClick = { scope.launch { loadNextPage() } }) { Text(Strings.retry) }
             }
-            text.isEmpty() && eof -> Text(Strings.fileEmpty)
-            text.isEmpty() -> Row(verticalAlignment = Alignment.CenterVertically,
+            // 首屏还没回来（含失败后的重试）：弹层已经在了，就在弹层里转圈
+            // （不是弹层外先提示、再打开）。
+            text.isEmpty() && (loading || !settled) -> Row(verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                 Text(Strings.fileLoading)
             }
+            text.isEmpty() -> Text(Strings.fileEmpty)
             else -> MonospaceBlock(text)
         }
         if (text.isNotEmpty()) {

@@ -1,6 +1,5 @@
 package ai.deepseek.dshphone.state
 
-import ai.deepseek.dshphone.ExternalOpenResult
 import ai.deepseek.dshphone.i18n.Strings
 import ai.deepseek.dshphone.i18n.fmt
 import ai.deepseek.dshphone.model.*
@@ -92,14 +91,6 @@ data class TriggerToken(val kind: Kind, val query: String, val start: Int, val e
 class PhoneModel private constructor(app: Application) {
 
     private val appContext = app.applicationContext
-
-    /** 把工作区文件落到缓存并交给系统文本查看器（见 [ai.deepseek.dshphone.FileOpener]）。 */
-    private val fileOpener = ai.deepseek.dshphone.FileOpener(appContext)
-
-    init {
-        // 缓存目录里的旧文件是上次进程留下的：启动清一次，别让它无限长。
-        fileOpener.prune()
-    }
 
     /**
      * 替代原来的 `viewModelScope`：作用域跟着进程走，不跟 Activity 走。
@@ -932,53 +923,6 @@ class PhoneModel private constructor(app: Application) {
         }
     }
 
-    /**
-     * 转写里的文件链接：把远端工作区文件读到本机，交给系统文本查看器。
-     *
-     * 与 Web 同一个协议（[workspaceFiles/read] 分页），只是终点不同——Web 在右侧栏
-     * 里就地渲染，手机端没有那个面板，于是转成 `content://` 交给系统 App。
-     * 主机读不回来（文件不存在、太大、不是文本）时返回可展示的失败原因。
-     *
-     * 读的是整份文件而不是首页：系统查看器打开以后就不由我们翻页了，只给第一页
-     * 等于给用户看半截。因此这里按 [workspaceFilePage] 连续翻到 eof，并带一个
-     * 页面上限兜底（超大文本不该把内存吃穿）。
-     */
-    suspend fun openFileInSystemViewer(
-        sessionId: SessionId,
-        target: FileLinkTarget,
-    ): ExternalOpenResult {
-        val path = target.path
-        val scopeId = target.sessionId ?: sessionId
-        val client = api ?: return ExternalOpenResult.Failed(Strings.disconnected)
-        return try {
-            // 空文件也照样交给查看器：让用户看到"它是空的"比一句失败更清楚。
-            val text = readWholeFile(client, scopeId, path)
-            fileOpener.openText(scopeId, path, pathBasename(path), text)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            ExternalOpenResult.Failed(describe(e))
-        }
-    }
-
-    private suspend fun readWholeFile(client: ApiClient, sessionId: SessionId, path: String): String {
-        val builder = StringBuilder()
-        var offset = 1
-        var pages = 0
-        while (pages < MAX_FILE_PAGES) {
-            val page = client.workspaceFileRead(sessionId, path, offset)
-            if (page.lines > 0) {
-                if (builder.isNotEmpty()) builder.append('\n')
-                builder.append(page.text)
-                offset = page.offset + page.lines
-            }
-            pages++
-            if (page.eof || page.lines == 0) break
-        }
-        if (builder.length > MAX_FILE_CHARS) builder.setLength(MAX_FILE_CHARS)
-        return builder.toString()
-    }
-
     // —— 子智能体 ——————————————————————————————————————————————
 
     suspend fun loadSubagents(parentSessionId: SessionId): List<SubagentListEntry> =
@@ -1280,17 +1224,6 @@ class PhoneModel private constructor(app: Application) {
          * 比首屏大：用户已经明确在往上翻，一次多给一点少一次往返。
          */
         private const val HISTORY_MESSAGES = 30
-
-        /**
-         * 交给系统查看器时最多读几页。
-         *
-         * 主机一页 5000 行，[MAX_FILE_CHARS] 通常先兜住；页数上限只是防止
-         * "空页但 eof 一直不来"这类主机异常把循环挂死。
-         */
-        private const val MAX_FILE_PAGES = 200
-
-        /** 交给系统查看器的文本上限（字符）：再大就不是"看文件"而是搬数据了。 */
-        private const val MAX_FILE_CHARS = 2_000_000
 
         /**
          * 面向用户的失败文案：把底层异常收敛成一句人话。

@@ -217,13 +217,6 @@ object Strings {
     val fileLoading: String get() = pick("Loading file…", "正在加载文件…")
     val fileEmpty: String get() = pick("This file is empty", "这个文件是空的")
     val fileUnavailable: String get() = pick("Couldn’t open this file", "无法打开此文件")
-    /** 文件链接：读回本机再交给系统文本查看器时的进行态。 */
-    val openInSystemViewer: String get() = pick("Opening in a text viewer…", "正在用文本查看器打开…")
-    /** 设备上一个能接文本的 App 都没有，退回内嵌预览。 */
-    val openInSystemViewerUnavailable: String get() =
-        pick("No text viewer on this device. You can use the built-in preview instead.", "本机没有可用的文本查看器，可改用内置预览。")
-    /** 系统查看器不可用时的退路：用应用内的只读预览打开。 */
-    val previewFallback: String get() = pick("Built-in preview", "内置预览")
     val cancel: String get() = pick("Cancel", "取消")
     val done: String get() = pick("Done", "完成")
     val close: String get() = pick("Close", "关闭")

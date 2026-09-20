@@ -309,8 +309,20 @@ private fun AssistantRow(
 @Composable
 private fun ContextRow(node: ChatNode.Context) {
     var detail by remember { mutableStateOf(false) }
-    val summary = node.provenanceLabel ?: Strings.contextInjected
-    val icon = if (node.provenanceRole == "recall") Icons.Default.History else Icons.AutoMirrored.Filled.NoteAdd
+    // notice 自带一句人能读的 summary，优先于来源名（对齐 iOS PhoneContextRow：
+    // collapsedSummary ?? provenanceLabel ?? contextInjected）；其余 form 没有这一行。
+    val summary = contextCollapsedSummary(node.source)
+        ?: node.provenanceLabel
+        ?: Strings.contextInjected
+    val icon = when (ContextForm.from(node.source)) {
+        ContextForm.INSTRUCTIONS -> Icons.AutoMirrored.Filled.List
+        ContextForm.CATALOG -> Icons.AutoMirrored.Filled.MenuBook
+        ContextForm.SNAPSHOT -> Icons.Default.CameraAlt
+        ContextForm.NOTICE -> Icons.Default.Notifications
+        ContextForm.RELAY -> Icons.AutoMirrored.Filled.TrendingFlat
+        ContextForm.RECALL -> Icons.Default.History
+        null -> if (node.provenanceRole == "recall") Icons.Default.History else Icons.AutoMirrored.Filled.NoteAdd
+    }
     CardRow(icon, summary, onClick = { detail = true })
     if (detail) {
         val text = plainText(node.content)

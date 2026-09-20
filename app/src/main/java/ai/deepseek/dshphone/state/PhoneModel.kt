@@ -1055,10 +1055,17 @@ class PhoneModel private constructor(app: Application) {
     fun toggleGoalPause(sessionId: SessionId) {
         scope.launch {
             val store = sessions[sessionId] ?: return@launch
-            val goal = store.goal ?: return@launch
+            // 用 activeGoal：条上画的和这里认的共用同一条折叠（blocked 也在这条上）。
+            val goal = store.activeGoal ?: return@launch
             val ref = store.goalRef ?: return@launch
             try {
-                if (goal.phase == "paused") api?.goalResume(sessionId, ref) else api?.goalPause(sessionId, ref)
+                // 与 GoalBar 同一张映射表：blocked/complete 上的暂停/恢复主机不接受，直接不发，
+                // 免得弹一句用户没法处理的 GOAL_INVALID_TRANSITION。
+                when (goalPhaseAction(goal.phase)) {
+                    GoalPhaseAction.PAUSE -> api?.goalPause(sessionId, ref)
+                    GoalPhaseAction.RESUME -> api?.goalResume(sessionId, ref)
+                    null -> Unit
+                }
             } catch (e: Exception) { lastErrorMessage = describe(e) }
         }
     }

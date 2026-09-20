@@ -738,10 +738,18 @@ private fun GoalBar(model: PhoneModel, sessionId: SessionId, store: SessionStore
                 Icon(Icons.Default.MoreHoriz, null, Modifier.size(18.dp))
             }
             DropdownMenu(menu, { menu = false }) {
-                DropdownMenuItem(
-                    text = { Text(if (goal.phase == "paused") Strings.goalResume else Strings.goalPause) },
-                    onClick = { menu = false; model.toggleGoalPause(sessionId) },
-                )
+                // 只给主机接受的转移：blocked 上给「暂停」必然被 GOAL_INVALID_TRANSITION 拒掉。
+                goalPhaseAction(goal.phase)?.let { action ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                if (action == GoalPhaseAction.RESUME) Strings.goalResume
+                                else Strings.goalPause,
+                            )
+                        },
+                        onClick = { menu = false; model.toggleGoalPause(sessionId) },
+                    )
+                }
                 DropdownMenuItem(
                     text = { Text(Strings.goalEdit) },
                     onClick = { menu = false; objectiveDraft = goal.objective; editing = true },

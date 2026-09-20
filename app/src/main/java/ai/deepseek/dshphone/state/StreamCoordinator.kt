@@ -38,6 +38,16 @@ class StreamCoordinator(
     private val attentionHandler: (AttentionSignal) -> Unit,
     /** 会话运行状态变过一次：宿主据此决定要不要起常驻的前台服务。 */
     private val runActivityHandler: () -> Unit = {},
+    /**
+     * 这条会话此刻是否真的在用户眼前（对齐 Mac 构造 coordinator 时传入的
+     * `foldsLiveEvents`/AppModel.sessionIsOnScreen）。
+     *
+     * Mac 与手机在这里的取舍不同：Mac 把"不在屏的会话"的整帧都丢掉，于是根本没有
+     * 机会把失败标成已读；手机仍然折叠（后台会话的窗口保持最新，回到列表后不必先
+     * 补一个洞），所以"帧要不要折"和"失败算不算看见"必须分开问——折叠照旧，
+     * 只有正看着的那条会话才把失败标成已读。
+     */
+    private val sessionIsOnScreen: (SessionId) -> Boolean = { true },
 ) {
     companion object {
         private const val TAG = "StreamCoordinator"
@@ -388,6 +398,9 @@ class StreamCoordinator(
                     scope.launch(Dispatchers.IO) { cache.saveWindow(sessionId, window) }
                 }
                 store.applyAssistantStreamBaseline(frame.assistantStream)
+                // 快照的重放会把失败位重新抬起来，所以已读要在窗口落定之后再标一次
+                //（对齐 Mac openHistoryIfNeeded 里那句 defer）。
+                if (sessionIsOnScreen(sessionId)) store.markErrorSeen()
                 val attempt = frame.assistantStream?.activeAttempt
                 if (attempt == null) assistantExpectations.remove(sessionId)
                 else assistantExpectations[sessionId] = attempt.attemptId to attempt.nextIndex
@@ -442,7 +455,7 @@ class StreamCoordinator(
         follow(sessionId, address)
     }
 
-    private suspend fun applyLiveEvent(sessionId: SessionId, entry: HistoryEntry) {
+    internal suspend fun applyLiveEvent(sessionId: SessionId, entry: HistoryEntry) {
         val event = entry.event
         if (event.type == "turn/start") listStore.setRunning(sessionId, true)
         else if (event.type == "turn/end") listStore.setRunning(sessionId, false)
@@ -463,7 +476,13 @@ class StreamCoordinator(
             }
         } else {
             store.apply(event, entry.view)
-            store.markErrorSeen()
+            // 失败算不算"已经看见"，只取决于用户是不是正看着这条会话。
+            //
+            // Mac 在 fold 之前就把不在屏的整帧丢掉了（foldsLiveEvents），于是那里的
+            // markErrorSeen 只可能对屏上的会话执行；手机不丢帧（窗口要靠实时帧保持最新，
+            // 选择时没有补洞那条路），所以必须在这里显式问一次。少了这一问，任何一条
+            // 已登记 follow 的后台会话一出错就立刻被标成已读，列表行的红点永远不会亮。
+            if (sessionIsOnScreen(sessionId)) store.markErrorSeen()
         }
     }
 }

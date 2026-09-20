@@ -100,6 +100,9 @@ fun ChatScreen(
     // 新页进场会早于本页退场，不比就会把新页刚写下的那条抹掉。
     DisposableEffect(sessionId) {
         model.visibleSessionId = sessionId
+        // 会话页进场就是"用户已经看过了"：把这条会话的未读失败红点收掉
+        //（对齐 Mac 选中会话时那句 markErrorSeen）。
+        model.markErrorSeen(sessionId)
         onDispose { if (model.visibleSessionId == sessionId) model.visibleSessionId = null }
     }
 

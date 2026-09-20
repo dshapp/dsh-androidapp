@@ -203,6 +203,17 @@ class PhoneModel private constructor(app: Application) {
     val currentStore: SessionStore? get() = selectedSessionId?.let { sessions[it] }
 
     /**
+     * 用户已经看过这条会话的失败：把它的红点收掉。
+     *
+     * 红点（[SessionStore.unreadError]）只有在会话于**屏幕之外**出错时才该亮着，
+     * 所以"看过"由两条边沿合成：会话页进场（[visibleSessionId]）和选择打开
+     *（[open]）。两条都走这里，免得红点在两种进入路径上表现不一致。
+     */
+    fun markErrorSeen(sessionId: SessionId) {
+        sessions[sessionId]?.markErrorSeen()
+    }
+
+    /**
      * 这条会话此刻是不是就在用户眼前——通知的"已经看得见，不必再喊一遍"判据
      * （对齐 Mac `decideAgentNotification` 里的 `appIsActive && visibleSessionId == id`）。
      */
@@ -259,6 +270,10 @@ class PhoneModel private constructor(app: Application) {
                 },
                 attentionHandler = { signal -> notifier?.invoke(signal) },
                 runActivityHandler = { noteRunActivity() },
+                // "用户已经看见这次失败"= 会话页此刻真的停在这条会话上（与通知那条
+                // appIsActive && visibleSessionId 的判据不同：这里问的是"读没读过"，
+                // 后台失败仍然要留红点，所以不看 appIsActive）。
+                sessionIsOnScreen = { visibleSessionId == it },
             )
             streamCoordinator.onConnectionState = { socketState = it }
             coordinator = streamCoordinator
@@ -410,6 +425,10 @@ class PhoneModel private constructor(app: Application) {
             listStore.selectedSessionId = sessionId
             listStore.clearCompleted(sessionId)
             val store = store(sessionId)
+            // 打开就是看过：清掉这条会话的未读失败红点（对齐 Mac 选中会话时那句
+            // markErrorSeen）。必须在 store 建出来之后——懒建的 store 还没有失败位，
+            // 在它前面标记只会是一次空操作。
+            store.markErrorSeen()
             // 这条会话上次的窗口先铺上再 follow：点开就能看到内容，follow 的
             // snapshot 回来整体替换。整段不阻塞，别的会话也能立刻打开。
             launch {

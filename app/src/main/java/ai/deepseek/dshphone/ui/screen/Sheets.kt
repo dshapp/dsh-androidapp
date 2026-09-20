@@ -263,20 +263,19 @@ private fun contextDetailRows(model: PhoneModel, store: SessionStore): List<Cont
             ))
         }
     }
-    store.tokenUsage?.let { usage ->
-        val uncached = usage.uncachedInputTokens ?: usage.inputTokens ?: 0
-        val cacheRead = usage.cacheReadTokens ?: 0
-        val cacheWrite = usage.cacheWriteTokens ?: 0
-        val output = usage.outputTokens ?: 0
-        val billed = uncached + cacheRead + cacheWrite
-        if (billed > 0 || output > 0) {
-            rows.add(ContextDetailRow(Strings.statsUsageTitle, tokenCount(billed + output), section = true))
-            cacheHitPercent(usage)?.let { rows.add(ContextDetailRow(Strings.turnUsageCacheHit, "$it%")) }
-            rows.add(ContextDetailRow(Strings.turnUsageInput, tokenCount(uncached)))
-            rows.add(ContextDetailRow(Strings.turnUsageCacheRead, tokenCount(cacheRead)))
-            if (cacheWrite != 0) rows.add(ContextDetailRow(Strings.turnUsageCacheWrite, tokenCount(cacheWrite)))
-            rows.add(ContextDetailRow(Strings.turnUsageOutput, tokenCount(output)))
+    SessionUsageReading(store.tokenUsage)?.takeIf { it.hasTokens }?.let { usage ->
+        rows.add(ContextDetailRow(Strings.statsUsageTitle, tokenCount(usage.total), section = true))
+        // 会话级一手读数（Mac sessionCacheHitPercent），不是单轮那个固定一位小数的口径：
+        // 99.96% 在这里是 "99.96"，用单轮那个会显示成 "99.9"。
+        sessionCacheHitPercent(usage.cacheRead, usage.billed)?.let {
+            rows.add(ContextDetailRow(Strings.turnUsageCacheHit, "$it%"))
         }
+        rows.add(ContextDetailRow(Strings.turnUsageInput, tokenCount(usage.uncached)))
+        rows.add(ContextDetailRow(Strings.turnUsageCacheRead, tokenCount(usage.cacheRead)))
+        if (usage.cacheWrite != 0) {
+            rows.add(ContextDetailRow(Strings.turnUsageCacheWrite, tokenCount(usage.cacheWrite)))
+        }
+        rows.add(ContextDetailRow(Strings.turnUsageOutput, tokenCount(usage.output)))
     }
     return rows
 }

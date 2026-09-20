@@ -302,6 +302,10 @@ object Strings {
     val notifyQuestion: String get() = pick("Needs an answer", "需要回答")
     val notifyDone: String get() = pick("Turn finished", "这一轮已完成")
     val notifyFailed: String get() = pick("Turn failed", "这一轮失败")
+    /** 主机的失败码是 `AUTH`（401/403）时替换 provider 原文的说法（web `message.failure.auth`）。 */
+    val turnFailureAuthInvalid: String get() = pick("API key is invalid", "API 密钥无效")
+    /** `turn/end` 的 error 没带 message 时的兜底（Mac `notificationTurnFailedFallback`）。 */
+    val turnFailureFallback: String get() = pick("The agent stopped with an error.", "智能体因错误中止。")
     val notifyServiceRunning: String get() =
         pick("Keeping the connection alive for running tasks", "正在为运行中的任务保持连接")
     val notifyServiceDescription: String get() =

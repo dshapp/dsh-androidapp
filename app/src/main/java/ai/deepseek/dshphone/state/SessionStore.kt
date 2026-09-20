@@ -927,7 +927,7 @@ class SessionStore(val sessionId: SessionId) {
         when (kind) {
             "error" -> {
                 val failure = reason["error"]
-                val message = failure["message"].str ?: reason["message"].str ?: "Turn failed"
+                val message = turnFailureMessage(reason)
                 val errKey = "turn-error:$turn"
                 (contexts[errKey] as? NodeContext.TurnErrorPending)?.let {
                     it.pending.message = message

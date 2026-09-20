@@ -74,9 +74,20 @@ fun formatTokensPerSecond(tps: Double): String {
  */
 private fun nonNegative(value: Double): Double = if (value.isNaN()) 0.0 else max(0.0, value)
 
+/**
+ * 一轮的计费桶加 output（web `TurnTokenUsage.totalTokens`）。
+ *
+ * 四个桶都直接来自 wire 上的 `tokenUsage` 投影，任一桶都可能顶着 Int.MAX_VALUE；
+ * 直接相加会回绕成负数，于是调用方的 `turnTotalTokens(usage) > 0` 为假，token 药丸
+ * 与明细卡双双消失——用户看到的是"这一轮没有用量"。Mac 的 `turnTotalTokens` 用
+ * saturatingAdding，WireNumbers.swift 里写明理由正是这条。
+ */
 fun turnTotalTokens(usage: TokenUsage): Int {
     val uncached = usage.uncachedInputTokens ?: usage.inputTokens ?: 0
-    return uncached + (usage.cacheReadTokens ?: 0) + (usage.cacheWriteTokens ?: 0) + (usage.outputTokens ?: 0)
+    return uncached
+        .saturatingAdding(usage.cacheReadTokens ?: 0)
+        .saturatingAdding(usage.cacheWriteTokens ?: 0)
+        .saturatingAdding(usage.outputTokens ?: 0)
 }
 
 fun formatTokens(value: Int): String {

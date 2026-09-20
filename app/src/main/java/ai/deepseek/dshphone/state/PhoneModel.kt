@@ -594,11 +594,12 @@ class PhoneModel private constructor(app: Application) {
         val client = api ?: return null
         val workspace = workspaceId?.let { id -> workspaceStore.workspaces.firstOrNull { it.workspaceId == id } }
         if (workspace != null) {
-            val archived = workspaceStore.archivedSessionIds.toSet()
-            val reuse = listStore.sessions.firstOrNull {
-                it.blank && it.cwd == workspace.path &&
-                    workspace.sessionIds.contains(it.sessionId) && it.sessionId !in archived
-            }
+            val reuse = reusableBlankSession(
+                listStore.sessions,
+                workspace,
+                workspaceStore.archivedSessionIds.toSet(),
+                agentPresets,
+            )
             if (reuse != null) {
                 open(reuse.sessionId)
                 return reuse.sessionId

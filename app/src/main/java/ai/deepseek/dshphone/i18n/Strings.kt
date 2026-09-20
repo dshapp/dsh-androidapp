@@ -269,6 +269,11 @@ object Strings {
     val questionPlanFeedbackPlaceholder: String get() = pick("Add revision notes (optional)", "写下修改意见（可选）")
     val questionPlanDiscuss: String get() = pick("Chat about it", "去聊天里说")
     val workflowUntitled: String get() = pick("Workflow", "工作流")
+    // web `workflowRun` 字典的 status.* 五个词（Mac `localizedStatusWord`）。
+    val workflowStatusRunning: String get() = pick("Running", "运行中")
+    val workflowStatusCompleted: String get() = pick("Completed", "已完成")
+    val workflowStatusFailed: String get() = pick("Failed", "失败")
+    val workflowStatusCancelled: String get() = pick("Cancelled", "已取消")
     val workflowStatusInterrupted: String get() = pick("Interrupted", "已中断")
     val askWaiting: String get() = pick("waiting", "等待回答")
     val askCancelled: String get() = pick("cancelled", "已取消")

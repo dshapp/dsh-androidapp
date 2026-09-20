@@ -345,7 +345,7 @@ private fun WorkflowRunCard(data: WorkflowRunData) {
     CardRow(
         workflowIcon(data.status),
         data.name,
-        suffix = data.status.name.lowercase(),
+        suffix = workflowStatusLabel(data.status),
         running = data.status == WorkflowRunStatus.RUNNING,
         onClick = { detail = true },
     )

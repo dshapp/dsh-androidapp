@@ -47,24 +47,35 @@ object Ws {
     /**
      * 连到 proxy 并完成 WebSocket 升级。
      *
-     * @param host proxy 的域名；同时用作 SNI 与 Host 头。
+     * @param host proxy 的域名；同时用作 SNI、主机名校验与 Host 头。
      * @param port 通常是 443。
      * @param timeoutMs TCP 连接超时。
+     * @param sslFactory 仅用于联调时注入自签证书的信任；默认是平台的。
      */
-    fun connect(host: String, port: Int, timeoutMs: Int): Connection {
+    fun connect(
+        host: String,
+        port: Int,
+        timeoutMs: Int,
+        sslFactory: SSLSocketFactory = SSLSocketFactory.getDefault() as SSLSocketFactory,
+    ): Connection {
         val tcp = Socket()
         tcp.tcpNoDelay = true
         tcp.connect(InetSocketAddress(host, port), timeoutMs)
-        val tls = (SSLSocketFactory.getDefault() as SSLSocketFactory)
-            .createSocket(tcp, host, port, true) as SSLSocket
-        // 证书校验按平台默认执行；SNI 由 createSocket 的 host 提供。
+        val tls = sslFactory.createSocket(tcp, host, port, true) as SSLSocket
+        // SSLSocket 只验证证书链，**不验证主机名**——少了这一步，任何 CA 给任何域名
+        // 签的有效证书都会被接受，中间人只需要一张自己域名的合法证书。HttpsURLConnection
+        // 和 OkHttp 各自在上层补了这件事，裸 SSLSocket 必须自己开。
+        tls.sslParameters = tls.sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
         tls.startHandshake()
 
         val key = ByteArray(16).also { random.nextBytes(it) }
         val encodedKey = Base64.getEncoder().encodeToString(key)
         val request = buildString {
             append("GET ").append(PATH).append(" HTTP/1.1\r\n")
-            append("Host: ").append(host).append("\r\n")
+            // 非默认端口必须带进 Host，否则代理/网关看到的权威与实际不符。
+            append("Host: ").append(host)
+            if (port != 443) append(":").append(port)
+            append("\r\n")
             append("Connection: Upgrade\r\n")
             append("Upgrade: websocket\r\n")
             append("Sec-WebSocket-Version: 13\r\n")

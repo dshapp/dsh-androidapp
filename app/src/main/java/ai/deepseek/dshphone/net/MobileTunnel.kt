@@ -5,7 +5,6 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
-import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketAddress
 import java.util.concurrent.atomic.AtomicReference
@@ -58,21 +57,27 @@ class NoiseSocketFactory(private val target: MobileTarget) : SocketFactory() {
 
 private class NoiseSocket(private val target: MobileTarget) : Socket() {
 
-    private val raw = Socket()
+    /** 升级完成的 WSS 载体；连接之前还没有。 */
+    private var carrier: Ws.Connection? = null
     private var input: InputStream = EMPTY
     private var output: OutputStream = NULL_OUTPUT
 
-    /** 连到 proxy 而不是 URL 里的主机名：那个名字只是 OkHttp 的路由键。 */
+    /**
+     * 连到 proxy 而不是 URL 里的主机名：那个名字只是 OkHttp 的路由键。
+     *
+     * 载体是 wss://<proxy>/tunnel —— 公网只暴露 HTTPS/WSS。升级之后拿到的是一对
+     * 普通字节流，所以下面的前导头和 Noise_IK 握手与裸 TCP 时代逐字相同。
+     */
     override fun connect(endpoint: SocketAddress?, timeout: Int) {
-        raw.tcpNoDelay = true
-        raw.connect(InetSocketAddress(target.host, target.port), timeout)
+        val connection = Ws.connect(target.host, target.port, timeout)
+        carrier = connection
         val preamble = ByteArray(Wire.HEAD_LENGTH)
         System.arraycopy(Wire.MAGIC_CLIENT, 0, preamble, 0, 4)
         preamble[4] = Wire.VERSION
         System.arraycopy(target.bridgeKey, 0, preamble, 5, Noise.KEY_LENGTH)
 
-        val out = raw.getOutputStream()
-        val inp = DataInputStream(raw.getInputStream())
+        val out = connection.output
+        val inp = DataInputStream(connection.input)
         out.write(preamble)
 
         val handshake = Noise.Handshake(target.device, target.bridgeKey, preamble)
@@ -89,27 +94,31 @@ private class NoiseSocket(private val target: MobileTarget) : Socket() {
     override fun getOutputStream(): OutputStream = output
 
     override fun close() {
-        raw.close()
+        carrier?.socket?.close()
     }
 
-    override fun isConnected(): Boolean = raw.isConnected
-    override fun isClosed(): Boolean = raw.isClosed
-    override fun isInputShutdown(): Boolean = raw.isInputShutdown
-    override fun isOutputShutdown(): Boolean = raw.isOutputShutdown
-    override fun shutdownInput() = raw.shutdownInput()
-    override fun shutdownOutput() = raw.shutdownOutput()
-    override fun setSoTimeout(timeout: Int) { raw.soTimeout = timeout }
-    override fun getSoTimeout(): Int = raw.soTimeout
-    override fun setTcpNoDelay(on: Boolean) { raw.tcpNoDelay = on }
-    override fun getTcpNoDelay(): Boolean = raw.tcpNoDelay
-    override fun setKeepAlive(on: Boolean) { raw.keepAlive = on }
-    override fun getKeepAlive(): Boolean = raw.keepAlive
-    override fun getInetAddress(): InetAddress? = raw.inetAddress
-    override fun getLocalAddress(): InetAddress? = raw.localAddress
-    override fun getPort(): Int = raw.port
-    override fun getLocalPort(): Int = raw.localPort
-    override fun getRemoteSocketAddress(): SocketAddress? = raw.remoteSocketAddress
-    override fun getLocalSocketAddress(): SocketAddress? = raw.localSocketAddress
+    // OkHttp 只把这些当连接状态来问，所以都问底下那条 TLS socket；连接建立之前
+    // 还没有载体，答"未连接"即可。
+    private val carried: Socket? get() = carrier?.socket
+
+    override fun isConnected(): Boolean = carried?.isConnected ?: false
+    override fun isClosed(): Boolean = carried?.isClosed ?: false
+    override fun isInputShutdown(): Boolean = carried?.isInputShutdown ?: false
+    override fun isOutputShutdown(): Boolean = carried?.isOutputShutdown ?: false
+    override fun shutdownInput() { carried?.shutdownInput() }
+    override fun shutdownOutput() { carried?.shutdownOutput() }
+    override fun setSoTimeout(timeout: Int) { carried?.soTimeout = timeout }
+    override fun getSoTimeout(): Int = carried?.soTimeout ?: 0
+    override fun setTcpNoDelay(on: Boolean) { carried?.tcpNoDelay = on }
+    override fun getTcpNoDelay(): Boolean = carried?.tcpNoDelay ?: true
+    override fun setKeepAlive(on: Boolean) { carried?.keepAlive = on }
+    override fun getKeepAlive(): Boolean = carried?.keepAlive ?: false
+    override fun getInetAddress(): InetAddress? = carried?.inetAddress
+    override fun getLocalAddress(): InetAddress? = carried?.localAddress
+    override fun getPort(): Int = carried?.port ?: target.port
+    override fun getLocalPort(): Int = carried?.localPort ?: -1
+    override fun getRemoteSocketAddress(): SocketAddress? = carried?.remoteSocketAddress
+    override fun getLocalSocketAddress(): SocketAddress? = carried?.localSocketAddress
 
     companion object {
         private val EMPTY = object : InputStream() {

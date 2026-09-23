@@ -124,6 +124,16 @@ class SessionStore(val sessionId: SessionId) {
     var jobs by mutableStateOf<List<JobView>>(emptyList())
         private set
 
+    /**
+     * 会话标题 → 会话 id：这个会话引用过的其它会话。
+     *
+     * host 把发出的 `@[标题](dsh-session:…)` 在落库前重写成了纯文本 `@标题`，
+     * 会话 id 只剩紧随其后的 `session-reference` 上下文还带着 —— 气泡要把标题
+     * 点成跳转就得靠它。
+     */
+    var referencedSessions by mutableStateOf<Map<String, String>>(emptyMap())
+        private set
+
     var todos by mutableStateOf<List<TodoItem>>(emptyList())
         private set
     var goal by mutableStateOf<GoalProjection?>(null)
@@ -489,6 +499,7 @@ class SessionStore(val sessionId: SessionId) {
 
     private fun replayHistory() {
         contexts.clear()
+        referencedSessions = emptyMap()
         durableCursor = -1
         transientInGap = 0
         presentedByTurn.clear()
@@ -624,6 +635,7 @@ class SessionStore(val sessionId: SessionId) {
             "user" -> if (claimedSteeringIds.contains(id)) "steering" else "user"
             else -> "context"
         }
+        if (sourceKind == "session-reference") noteReferencedSessions(source)
         val node: ChatNode = when (kind) {
             "steering" -> ChatNode.Steering(event.seq, event.time, id, content)
             "context" -> {
@@ -633,6 +645,18 @@ class SessionStore(val sessionId: SessionId) {
             else -> ChatNode.User(event.seq, event.time, id, content)
         }
         contexts["$kind:$id"] = NodeContext.Finalized(node)
+    }
+
+    /** 记下一条 recall 上下文里的 label → sessionId，供用户气泡把标题点成跳转。 */
+    private fun noteReferencedSessions(source: JsonElement?) {
+        val list = source["references"].arr ?: return
+        val merged = referencedSessions.toMutableMap()
+        for (entry in list) {
+            val label = entry["label"].str?.takeIf { it.isNotEmpty() } ?: continue
+            val sessionId = entry["sessionId"].str?.takeIf { it.isNotEmpty() } ?: continue
+            merged[label] = sessionId
+        }
+        if (merged != referencedSessions) referencedSessions = merged
     }
 
     // —— 助手流 ————————————————————————————————————————————————

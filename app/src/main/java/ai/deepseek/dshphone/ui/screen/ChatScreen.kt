@@ -472,6 +472,7 @@ fun ChatScreen(
                             onFork = { seq ->
                                 scope.launch { model.fork(sessionId, seq)?.let(onOpenSession) }
                             },
+                            onOpenSession = onOpenSession,
                             // 命中行才把查询词交给行内渲染，未命中的行不因查询变化重组。
                             findQuery = if (finding && findQuery.isNotBlank()) findQuery else "",
                             findActive = isActiveHit,
@@ -520,6 +521,7 @@ fun ChatScreen(
                         onOpenFile = { path -> openFileLink(FileLinkTarget(path)) },
                         onOpenLink = { target -> openFileLink(target) },
                         onFork = {},
+                        onOpenSession = onOpenSession,
                     )
                 }
             }

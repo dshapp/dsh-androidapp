@@ -35,7 +35,11 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withLink
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
@@ -52,14 +56,16 @@ fun MessageRow(
     /** Markdown 链接指向的工作区文件；用系统查看器打开。 */
     onOpenLink: (ai.deepseek.dshphone.model.FileLinkTarget) -> Unit,
     onFork: (Int) -> Unit,
+    /** 用户气泡里 `@标题` 会话引用被点开：推一层那条会话。 */
+    onOpenSession: (SessionId) -> Unit = {},
     /** 会话内查找的查询词；空串表示不在查找态，不画高亮。 */
     findQuery: String = "",
     /** 这一行是否查找栏当前停靠的命中行。 */
     findActive: Boolean = false,
 ) {
     when (node) {
-        is ChatNode.User -> UserBubble(node.content, sessionId, model, findQuery, findActive)
-        is ChatNode.Steering -> UserBubble(node.content, sessionId, model, findQuery, findActive)
+        is ChatNode.User -> UserBubble(node.content, sessionId, model, onOpenSession, findQuery, findActive)
+        is ChatNode.Steering -> UserBubble(node.content, sessionId, model, onOpenSession, findQuery, findActive)
         is ChatNode.Context -> ContextRow(node)
         is ChatNode.Assistant ->
             AssistantRow(node.step, sessionId, model, store, onOpenFile, onOpenLink, findQuery, findActive)
@@ -85,6 +91,7 @@ private fun UserBubble(
     content: List<ContentBlock>,
     sessionId: SessionId,
     model: PhoneModel,
+    onOpenSession: (SessionId) -> Unit,
     findQuery: String = "",
     findActive: Boolean = false,
 ) {
@@ -110,8 +117,26 @@ private fun UserBubble(
             // 命中词在气泡里逐字高亮：气泡是纯文本，能直接画区间，
             // 不像 Markdown 那样要钻进行内渲染里。
             val findStyle = if (findQuery.isBlank()) null else findSpanStyle(findActive)
-            val body = if (findStyle == null) AnnotatedString(text)
-            else buildAnnotatedString { appendFindHighlighted(text, findQuery, findStyle) }
+            // 被引用会话的整条标题画成可点的强调色链接：host 落库时把
+            // `@[标题](dsh-session:…)` 重写成了纯文本 `@标题`，标题与会话 id 的
+            // 对应关系只能从 store 的 referencedSessions 拿。
+            val sessions = model.sessions[sessionId]?.referencedSessions ?: emptyMap()
+            val linkColor = MaterialTheme.colorScheme.primary
+            val body = buildAnnotatedString {
+                for (token in projectUserRefs(text, sessions)) when (token) {
+                    is UserRefToken.Text ->
+                        if (findStyle == null) append(token.text)
+                        else appendFindHighlighted(token.text, findQuery, findStyle)
+                    is UserRefToken.Session -> withLink(
+                        LinkAnnotation.Clickable("session") { onOpenSession(token.sessionId) }
+                    ) {
+                        withStyle(SpanStyle(color = linkColor)) {
+                            if (findStyle == null) append("@" + token.label)
+                            else appendFindHighlighted("@" + token.label, findQuery, findStyle)
+                        }
+                    }
+                }
+            }
             Box(Modifier.clickable { copyMenu = true }) {
                 androidx.compose.foundation.text.selection.SelectionContainer {
                     Text(

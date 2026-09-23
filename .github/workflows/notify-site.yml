@@ -1,0 +1,36 @@
+# main 有新提交时通知站点仓库 dshapp/dshapp.github.io 构建并发布新的安装包。
+#
+# 构建本身在公开的站点仓库里进行（免费 runner），这里只发一个 repository_dispatch，
+# 通常几秒钟跑完。站点仓库另有每 30 分钟一次的轮询兜底，这个 job 没跑成也不会漏版本。
+#
+# 需要 secret SITE_DISPATCH_TOKEN：fine-grained PAT，仓库只选 dshapp/dshapp.github.io，
+# 权限 Contents: Read and write。没配置时本 job 会跳过并给出提示，不会报错。
+name: Notify site to publish build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch app-updated to dshapp/dshapp.github.io
+        env:
+          GH_TOKEN: ${{ secrets.SITE_DISPATCH_TOKEN }}
+          APP: android
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::SITE_DISPATCH_TOKEN 未配置，跳过通知（站点仓库的定时轮询仍会发布这次提交）。"
+            exit 0
+          fi
+          gh api repos/dshapp/dshapp.github.io/dispatches \
+            -f event_type=app-updated \
+            -f "client_payload[app]=$APP" \
+            -f "client_payload[sha]=$GITHUB_SHA"
+          echo "已通知站点构建 $APP @ ${GITHUB_SHA::7}" >> "$GITHUB_STEP_SUMMARY"

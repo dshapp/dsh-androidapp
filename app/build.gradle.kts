@@ -13,13 +13,29 @@ android {
         applicationId = "ai.deepseek.dshphone"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        // CI 通过 -PversionCode / -PversionName 注入发布版本号；本地构建沿用默认值
+        versionCode = (project.findProperty("versionCode") as String?)?.toInt() ?: 1
+        versionName = (project.findProperty("versionName") as String?) ?: "1.0"
+    }
+
+    // release 签名只从环境变量读取（CI 从 secret 注入），keystore 从不入库。
+    // 没配置时 release 包保持未签名，本地 ./deploy.sh 的 debug 流程不受影响。
+    val releaseKeystore = System.getenv("DSH_KEYSTORE_FILE")?.let { file(it) }?.takeIf { it.exists() }
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = releaseKeystore
+                storePassword = System.getenv("DSH_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("DSH_KEY_ALIAS")
+                keyPassword = System.getenv("DSH_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (releaseKeystore != null) signingConfig = signingConfigs.getByName("release")
         }
         debug {
             // 自测时传 -PprobeSuffix=.probe 装一份独立包名的实例，

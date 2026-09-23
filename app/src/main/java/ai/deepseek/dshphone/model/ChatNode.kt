@@ -11,7 +11,6 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -24,7 +23,6 @@ sealed interface ContentBlock {
     data class Reasoning(val text: String) : ContentBlock
     data class Image(val attachment: JsonElement?) : ContentBlock
     data class ToolCall(val id: CallId, val name: String, val arguments: String) : ContentBlock
-    data class ToolResult(val toolCallId: CallId, val content: List<ContentBlock>, val isError: Boolean) : ContentBlock
     data class Other(val raw: JsonElement?) : ContentBlock
 }
 
@@ -39,11 +37,6 @@ fun decodeContentBlock(value: JsonElement?): ContentBlock {
             obj["name"].str ?: "",
             obj["arguments"].str ?: "",
         )
-        "tool-result" -> ContentBlock.ToolResult(
-            obj["toolCallId"].str ?: "",
-            (obj["content"].arr ?: emptyList()).map { decodeContentBlock(it) },
-            obj["isError"].bool ?: false,
-        )
         else -> ContentBlock.Other(value)
     }
 }
@@ -57,14 +50,6 @@ fun encodeContentBlock(block: ContentBlock): JsonElement = when (block) {
     }
     is ContentBlock.ToolCall -> buildJsonObject {
         put("type", "tool-call"); put("id", block.id); put("name", block.name); put("arguments", block.arguments)
-    }
-    is ContentBlock.ToolResult -> buildJsonObject {
-        put("type", "tool-result")
-        put("toolCallId", block.toolCallId)
-        // 嵌套正文必须跟着编出去：toolResultText/resultFirstLine 靠这条编码把非文本块
-        // 摊成可复制文本，漏了 content 等于把嵌套工具结果整段丢掉（Mac 同样 encode content）。
-        put("content", buildJsonArray { block.content.forEach { add(encodeContentBlock(it)) } })
-        put("isError", block.isError)
     }
     is ContentBlock.Other -> block.raw ?: JsonObject(emptyMap())
 }
@@ -87,7 +72,6 @@ fun toAssistantBlock(block: ContentBlock): AssistantBlock = when (block) {
     is ContentBlock.Reasoning -> AssistantBlock.Reasoning(block.text)
     is ContentBlock.Image -> AssistantBlock.Image(block.attachment)
     is ContentBlock.ToolCall -> AssistantBlock.ToolCall(block.id, block.name, block.arguments)
-    is ContentBlock.ToolResult -> AssistantBlock.Other(null)
     is ContentBlock.Other -> AssistantBlock.Other(block.raw)
 }
 

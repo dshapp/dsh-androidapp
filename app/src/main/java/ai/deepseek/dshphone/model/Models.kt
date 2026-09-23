@@ -20,6 +20,8 @@ data class SessionSummary(
     var updatedAt: Double = 0.0,
     var running: Boolean = false,
     var blank: Boolean = false,
+    /** 这条会话的 Agent 此刻能否接消息（0.1.7 起随列表行下发）；可继续子会话据此判断父会话是否在线。 */
+    var agentAvailable: Boolean? = null,
     var parentSessionId: SessionId? = null,
     var origin: String? = null,
     var cwd: String? = null,
@@ -303,22 +305,22 @@ data class WorkspaceOrderValue(val workspaceIds: List<WorkspaceId> = emptyList()
 @Serializable
 data class AgentPresetEntry(
     val id: String,
-    val trust: String = "user",
     val isDefault: Boolean = false,
     val name: String? = null,
     val description: String? = null,
     val broken: String? = null,
-)
+) {
+    /** 内置预设不发布 `name`；给自己起了名的声明自带文案（主机 `isBuiltInPreset` 同口径）。 */
+    val isBuiltIn: Boolean get() = name == null && id in AGENT_PRESET_BUILT_IN_IDS
+}
+
+/** 由本端本地化文案的内置预设 id。 */
+val AGENT_PRESET_BUILT_IN_IDS = setOf("standard", "ptc", "minimal", "cordis")
 
 @Serializable
 data class AgentPresetListValue(
     val presets: List<AgentPresetEntry> = emptyList(),
-    val authorable: Boolean = false,
-    val hasDocument: Boolean = false,
-    /**
-     * 主机是否允许新会话选择 Agent 模式。0.1.6 之前的主机不发布该字段，
-     * 默认 true（与 Mac `AgentPresetListValue.modeSelectionEnabled` 同一口径）。
-     */
+    /** 主机是否允许新会话选择 Agent 模式（与 Mac `AgentPresetListValue.modeSelectionEnabled` 同一口径）。 */
     val modeSelectionEnabled: Boolean = true,
 )
 
@@ -395,9 +397,15 @@ data class JobView(
 @Serializable
 enum class SubagentMode {
     @SerialName("one-shot") ONE_SHOT,
-    @SerialName("continuable") CONTINUABLE;
+    @SerialName("continuable") CONTINUABLE,
+    /** 0.1.7 起目录里也会留下模式不明的子会话：只能浏览，不能继续发消息。 */
+    @SerialName("unknown") UNKNOWN;
 
-    val wire: String get() = if (this == ONE_SHOT) "one-shot" else "continuable"
+    val wire: String get() = when (this) {
+        ONE_SHOT -> "one-shot"
+        CONTINUABLE -> "continuable"
+        UNKNOWN -> "unknown"
+    }
 }
 
 data class SubagentAddress(
@@ -406,18 +414,17 @@ data class SubagentAddress(
     val mode: SubagentMode,
 )
 
-/** subagents/list 的一行：健康的子会话或一条诊断。 */
-data class SubagentListEntry(
-    val sessionId: SessionId,
-    val isChild: Boolean,
-    val mode: SubagentMode = SubagentMode.ONE_SHOT,
-    val running: Boolean = false,
-    val hasChildren: Boolean = false,
+/**
+ * 父会话 `subagentCatalog` 投影里的一个直接子会话（0.1.7 删掉了 `subagents/list`）。
+ * 运行状态不在这里，取子会话自己的会话摘要。
+ */
+@Serializable
+data class SubagentCatalogEntry(
+    val id: SessionId,
+    val createdAt: Double = 0.0,
+    val mode: SubagentMode = SubagentMode.UNKNOWN,
     val label: String? = null,
-    val reason: String? = null,
 )
-
-data class SubagentListValue(val entries: List<SubagentListEntry>, val parentAvailable: Boolean)
 
 // 会话地址 ————————————————————————————————————————————————————
 

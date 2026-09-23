@@ -16,8 +16,9 @@ import kotlinx.serialization.json.put
 /**
  * 消费唯一的多路下行，把每条逻辑流路由到各个 Store。
  *
- * 连接期间常开四条流：$events / workspace/follow / session/control，
- * 外加每个打开会话一条 session/follow。每条流都以完整基线开场，
+ * 连接期间常开三条流：$events / workspace/follow / session/control，
+ * 外加每个打开会话一条 session/follow 与一条 job/list（0.1.7 把后台任务从 control
+ * 流拆成了按会话订阅）。每条流都以完整基线开场，
  * 所以"重连"等于"重新订阅"而不是"重新同步"。
  */
 class StreamCoordinator(
@@ -64,6 +65,9 @@ class StreamCoordinator(
         fun followStreamId(sessionId: SessionId) = "follow:$sessionId"
         fun sessionIdOfFollow(streamId: String): SessionId? =
             if (streamId.startsWith("follow:")) streamId.removePrefix("follow:") else null
+        fun jobsStreamId(sessionId: SessionId) = "jobs:$sessionId"
+        fun sessionIdOfJobs(streamId: String): SessionId? =
+            if (streamId.startsWith("jobs:")) streamId.removePrefix("jobs:") else null
     }
 
     private var mux: MuxStream? = null
@@ -87,7 +91,6 @@ class StreamCoordinator(
      * 「基线之后才创建的 store」没有投影历史可回放，只能从这份最新值回灌（对齐 Mac 的 inboxQueues）。
      */
     private val inboxQueues = mutableMapOf<SessionId, List<QueuedInboxItem>>()
-    private val jobs = mutableMapOf<SessionId, List<JobView>>()
     private val followAddresses = mutableMapOf<SessionId, SessionAddress>()
     private val assistantExpectations = mutableMapOf<SessionId, Pair<String, Int>>()
 
@@ -147,6 +150,11 @@ class StreamCoordinator(
                 })
             },
         )
+        mux?.subscribe(
+            jobsStreamId(sessionId),
+            "job/list",
+            buildJsonObject { put("request", buildJsonObject { put("sessionId", sessionId) }) },
+        )
         return true
     }
 
@@ -161,6 +169,7 @@ class StreamCoordinator(
         followAddresses.remove(sessionId)
         assistantExpectations.remove(sessionId)
         mux?.unsubscribe(followStreamId(sessionId))
+        mux?.unsubscribe(jobsStreamId(sessionId))
     }
 
     private fun foldSocketState(state: WsConnectionState) {
@@ -210,6 +219,11 @@ class StreamCoordinator(
             WORKSPACES -> handleWorkspace(decodeWorkspaceFrame(value))
             CONTROL -> handleControl(decodeControlFrame(value))
             else -> {
+                sessionIdOfJobs(streamId)?.let { sessionId ->
+                    if (removedSessionIds.contains(sessionId)) return
+                    decodeJobListFrame(value)?.let { sessionUpsert(sessionId).replaceJobs(it) }
+                    return
+                }
                 val sessionId = sessionIdOfFollow(streamId) ?: return
                 handleFollow(sessionId, decodeFollowFrame(value))
             }
@@ -244,7 +258,6 @@ class StreamCoordinator(
                 listStore.remove(sessionId)
                 queues.remove(sessionId)
                 inboxQueues.remove(sessionId)
-                jobs.remove(sessionId)
                 unfollow(sessionId)
                 sessionRemovedHandler(sessionId)
             }
@@ -321,7 +334,7 @@ class StreamCoordinator(
     private fun handleWorkspace(frame: WorkspaceFollowFrame) {
         when (frame) {
             is WorkspaceFollowFrame.Baseline -> {
-                workspaceStore.setWorkspaces(frame.items, frame.archivedSessionIds)
+                workspaceStore.setWorkspaces(frame.items, frame.archivedSessionIds, frame.pinnedSessionIds)
                 // 冷启动/重连的基线也要把名册侧的归档镜像对齐，否则上一次连接留下的
                 // 归档集合会继续影响主列表的渲染过滤（见 PhoneModel.handleSessionsArchived）。
                 listStore.archivedSessionIds = frame.archivedSessionIds
@@ -333,6 +346,7 @@ class StreamCoordinator(
                 workspaceStore.setArchived(frame.archivedSessionIds)
                 sessionsArchivedHandler(frame.archivedSessionIds)
             }
+            is WorkspaceFollowFrame.Pinned -> workspaceStore.setPinned(frame.pinnedSessionIds)
             WorkspaceFollowFrame.Unknown -> Unit
         }
     }
@@ -343,7 +357,6 @@ class StreamCoordinator(
         when (frame) {
             is SessionControlFrame.Baseline -> {
                 queues.clear(); queues.putAll(frame.queues)
-                jobs.clear(); jobs.putAll(frame.jobs)
                 for (store in allSessions()) hydrateControlState(store)
                 for ((sessionId, block) in frame.projections) {
                     for ((key, value) in block.values) {
@@ -354,10 +367,6 @@ class StreamCoordinator(
             is SessionControlFrame.Queue -> {
                 queues[frame.frame.sessionId] = frame.frame.items
                 sessionLookup(frame.frame.sessionId)?.applyQueue(frame.frame.items)
-            }
-            is SessionControlFrame.Jobs -> {
-                jobs[frame.frame.sessionId] = frame.frame.jobs
-                sessionLookup(frame.frame.sessionId)?.setJobs(frame.frame)
             }
             is SessionControlFrame.Projection -> applyControlProjection(frame.frame)
             SessionControlFrame.Unknown -> Unit
@@ -381,7 +390,6 @@ class StreamCoordinator(
     fun hydrateControlState(store: SessionStore) {
         // 0.1.5 走 control 的 queues，0.1.6 走 inbox 投影；两者只会有一个有值。
         store.applyQueue(queues[store.sessionId] ?: inboxQueues[store.sessionId] ?: emptyList())
-        store.setJobs(SessionJobsFrame(store.sessionId, jobs[store.sessionId] ?: emptyList()))
     }
 
     // —— session/follow ——————————————————————————————————

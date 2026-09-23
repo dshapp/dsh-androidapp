@@ -2,21 +2,30 @@ package ai.deepseek.dshphone.net
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Dns
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartReader
 import okhttp3.OkHttpClient
+import okhttp3.ResponseBody
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 import java.net.InetAddress
+import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
@@ -81,15 +90,20 @@ class ApiClient(target: MobileTarget) {
                         .toRequestBody("application/json".toMediaType())
                 )
                 .build()
-            val text = try {
+            val (text, binaryParts) = try {
                 http.newCall(request).execute().use { response ->
-                    val payload = response.body?.string().orEmpty()
+                    val body = response.body
                     if (!response.isSuccessful) {
+                        val payload = body?.string().orEmpty()
                         throw ApiException(
                             RpcError("internal", payload.ifBlank { "HTTP ${response.code}" })
                         )
                     }
-                    payload
+                    if (body?.contentType()?.let { it.type == "multipart" && it.subtype == "form-data" } == true) {
+                        readBinaryResponse(body)
+                    } else {
+                        body?.string().orEmpty() to null
+                    }
                 }
             } catch (e: ApiException) {
                 throw e
@@ -98,6 +112,7 @@ class ApiClient(target: MobileTarget) {
             }
             val envelope = runCatching { DshJson.decodeFromString(ServerResponse.serializer(), text) }
                 .getOrElse { throw internalError("bad response: ${it.message}") }
+                .let { if (binaryParts == null) it else it.withBinaryParts(text, binaryParts) }
             if (envelope.rpcId != rpcId) throw internalError("rpcId mismatch")
             if (!envelope.result.ok) {
                 throw ApiException(envelope.result.error ?: RpcError("internal", "unknown error"))
@@ -188,5 +203,62 @@ class ApiClient(target: MobileTarget) {
             )
             true
         }.getOrElse { false }
+    }
+}
+
+/**
+ * 0.1.7 起带字节的返回（`workspaceFiles/readBytes`、`session/attachment`）改成 multipart：
+ * `metadata` 一段是信封 JSON，其余每段是一份原始字节。这里只把各段读出来，
+ * 拼回信封交给 [withBinaryParts]。
+ */
+internal fun readBinaryResponse(body: ResponseBody): Pair<String, Map<String, ByteArray>> {
+    var metadata: String? = null
+    val parts = mutableMapOf<String, ByteArray>()
+    MultipartReader(body).use { reader ->
+        while (true) {
+            val part = reader.nextPart() ?: break
+            val name = part.headers["Content-Disposition"]
+                ?.let { Regex("""(?:^|;)\s*name="([^"]*)"""").find(it)?.groupValues?.get(1) }
+                ?: throw internalError("binary response part without a name")
+            if (name == "metadata") metadata = part.body.readUtf8()
+            else parts[name] = part.body.readByteArray()
+        }
+    }
+    return (metadata ?: throw internalError("binary response without metadata")) to parts
+}
+
+/**
+ * 把 multipart 里的字节按信封 `attachments[].path` 放回 `result.value`。
+ *
+ * 放回去的是 base64 字符串：与 0.1.6 之前 JSON 里的 `data` 同一形状，模型层不必分两套。
+ */
+internal fun ServerResponse.withBinaryParts(metadata: String, parts: Map<String, ByteArray>): ServerResponse {
+    if (!result.ok) return this
+    val attachments = DshJson.parseToJsonElement(metadata).jsonObject["attachments"]?.jsonArray
+        ?: throw internalError("binary response without attachments")
+    var value = result.value ?: JsonNull
+    for (attachment in attachments) {
+        val obj = attachment.jsonObject
+        val part = obj["part"]?.jsonPrimitive?.content ?: throw internalError("bad binary attachment")
+        val bytes = parts[part] ?: throw internalError("missing binary part $part")
+        val path = obj["path"]?.jsonArray ?: throw internalError("bad binary attachment")
+        value = replaceAt(value, path, 0, JsonPrimitive(Base64.getEncoder().encodeToString(bytes)))
+    }
+    return copy(result = result.copy(value = value))
+}
+
+private fun replaceAt(node: JsonElement, path: JsonArray, index: Int, leaf: JsonElement): JsonElement {
+    if (index == path.size) return leaf
+    val segment = path[index].jsonPrimitive
+    return when (node) {
+        is JsonObject -> {
+            val key = segment.content
+            JsonObject(node + (key to replaceAt(node[key] ?: JsonNull, path, index + 1, leaf)))
+        }
+        is JsonArray -> {
+            val at = segment.intOrNull ?: throw internalError("bad binary path")
+            JsonArray(node.toMutableList().also { it[at] = replaceAt(it[at], path, index + 1, leaf) })
+        }
+        else -> throw internalError("bad binary path")
     }
 }

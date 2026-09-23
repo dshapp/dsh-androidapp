@@ -398,10 +398,10 @@ object TurnDeliverables {
 data class AgentPresetDisplayText(val name: String, val description: String?)
 
 fun agentPresetDisplayText(preset: AgentPresetEntry): AgentPresetDisplayText {
-    if (preset.trust == "system") {
+    if (preset.isBuiltIn) {
         when (preset.id) {
             "standard" -> return AgentPresetDisplayText(Strings.presetStandardName, preset.description)
-            "code" -> return AgentPresetDisplayText(Strings.presetCodeName, preset.description)
+            "ptc" -> return AgentPresetDisplayText(Strings.presetPtcName, preset.description)
             "minimal" -> return AgentPresetDisplayText(Strings.presetMinimalName, preset.description)
             "cordis" -> return AgentPresetDisplayText(Strings.presetCordisName, preset.description)
         }
@@ -411,7 +411,7 @@ fun agentPresetDisplayText(preset: AgentPresetEntry): AgentPresetDisplayText {
 
 fun agentPresetMenuLabel(preset: AgentPresetEntry): String {
     val name = agentPresetDisplayText(preset).name
-    return if (preset.trust == "user") "$name · ${Strings.presetUserTrust}" else name
+    return if (preset.isBuiltIn) name else "$name · ${Strings.presetUserTrust}"
 }
 
 // "(Recommended)" 后缀拆分 ——————————————————————————————————
@@ -480,7 +480,3 @@ fun clockTime(ms: Double): String {
 fun formatBytes(count: Int): String =
     if (count >= 1 shl 20) String.format(FIXED_LOCALE, "%.1f MB", count.toDouble() / (1 shl 20))
     else String.format(FIXED_LOCALE, "%.0f KB", count.toDouble() / 1024)
-
-// 子智能体会话 id ——————————————————————————————————————————————
-
-fun subagentSessionIds(entries: List<SubagentListEntry>): List<SessionId> = entries.map { it.sessionId }

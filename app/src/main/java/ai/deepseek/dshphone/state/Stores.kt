@@ -41,12 +41,9 @@ class SessionListStore(private val prefs: SharedPreferences?) {
         private set
     var draftSessionIds by mutableStateOf<Set<SessionId>>(emptySet())
         private set
-    var pinnedSessionOrder by mutableStateOf<List<SessionId>>(emptyList())
-        private set
     var flatManualOrder by mutableStateOf<List<SessionId>>(emptyList())
         private set
 
-    val pinnedSessionIds: Set<SessionId> get() = pinnedSessionOrder.toSet()
     val sessionsById: Map<SessionId, SessionSummary> get() = sessions.associateBy { it.sessionId }
 
     private val previousRunning = mutableMapOf<SessionId, Boolean>()
@@ -117,7 +114,6 @@ class SessionListStore(private val prefs: SharedPreferences?) {
     }
 
     init {
-        pinnedSessionOrder = readOrder(PINNED_KEY)
         flatManualOrder = readOrder(MANUAL_KEY)
         // 上次进程结束时还在跑的那些会话。进程被系统回收后重开时，内存里的
         // `previousRunning` 已经没了，只有这份落盘的记录能让"运行 -> 停止"的边沿
@@ -252,7 +248,6 @@ class SessionListStore(private val prefs: SharedPreferences?) {
         awaitingUserSessionIds = awaitingUserSessionIds - sessionId
         awaitingUserKinds = awaitingUserKinds - sessionId
         draftSessionIds = draftSessionIds - sessionId
-        if (pinnedSessionIds.contains(sessionId)) setPinned(sessionId, false)
     }
 
     fun recordActivity(sessionId: SessionId, updatedAt: Double) {
@@ -307,21 +302,6 @@ class SessionListStore(private val prefs: SharedPreferences?) {
         // 免得高频投影帧每来一帧都重建一遍。
         seqs.getOrPut(sessionId) { mutableMapOf() }[key] = seq
         projectionSeqCache = seqs
-    }
-
-    fun setPinned(sessionId: SessionId, pinned: Boolean) {
-        pinnedSessionOrder = if (pinned) {
-            if (pinnedSessionOrder.contains(sessionId)) pinnedSessionOrder else pinnedSessionOrder + sessionId
-        } else {
-            pinnedSessionOrder.filterNot { it == sessionId }
-        }
-        writeOrder(PINNED_KEY, pinnedSessionOrder)
-    }
-
-    fun pinnedOrder(visible: List<SessionSummary>): List<SessionSummary> {
-        if (pinnedSessionOrder.isEmpty()) return emptyList()
-        val byId = visible.associateBy { it.sessionId }
-        return pinnedSessionOrder.mapNotNull { byId[it] }
     }
 
     fun manualOrder(visible: List<SessionSummary>): List<SessionSummary> {
@@ -431,7 +411,6 @@ class SessionListStore(private val prefs: SharedPreferences?) {
     }
 
     companion object {
-        private const val PINNED_KEY = "pinned_session_order"
         private const val MANUAL_KEY = "flat_session_order"
         /** 落盘的"上次还在跑"的会话集合，用于进程重启后的完成补发。 */
         private const val RUNNING_KEY = "running_session_ids"
@@ -444,15 +423,32 @@ class WorkspaceStore {
         private set
     var archivedSessionIds by mutableStateOf<List<SessionId>>(emptyList())
         private set
+    /**
+     * 置顶集，最近置顶的在前。0.1.7 起由主机保存（`workspace/follow` 的基线与 `pinned` 帧），
+     * 多端共享同一份，本地不再落盘。
+     */
+    var pinnedSessionIds by mutableStateOf<List<SessionId>>(emptyList())
+        private set
+    val pinnedSessionSet: Set<SessionId> get() = pinnedSessionIds.toSet()
+
+    fun setPinned(ids: List<SessionId>) { if (ids != pinnedSessionIds) pinnedSessionIds = ids }
+
+    /** 按主机的置顶顺序挑出可见行。 */
+    fun pinnedOrder(visible: List<SessionSummary>): List<SessionSummary> {
+        if (pinnedSessionIds.isEmpty()) return emptyList()
+        val byId = visible.associateBy { it.sessionId }
+        return pinnedSessionIds.mapNotNull { byId[it] }
+    }
 
     val workspaceTitleBySession: Map<SessionId, String>
         get() = buildMap {
             for (workspace in workspaces) for (id in workspace.sessionIds) put(id, workspace.title)
         }
 
-    fun setWorkspaces(items: List<WorkspaceView>, archived: List<SessionId>) {
+    fun setWorkspaces(items: List<WorkspaceView>, archived: List<SessionId>, pinned: List<SessionId>) {
         workspaces = items
         archivedSessionIds = archived
+        setPinned(pinned)
     }
 
     fun upsert(workspace: WorkspaceView) {

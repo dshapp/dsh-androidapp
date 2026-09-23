@@ -461,7 +461,6 @@ class SessionStore(val sessionId: SessionId) {
         }
         rebuildProjections(authoritativeLastSeq)
         queue = emptyList()
-        jobs = emptyList()
         pendingApproval = null
         pendingQuestion = null
         lastSeq = authoritativeLastSeq
@@ -618,7 +617,8 @@ class SessionStore(val sessionId: SessionId) {
         val source = data["source"]
         source["rpcId"].str?.let { retirePendingSubmission(it) }
         if (isReplacementSurface(event)) return
-        if (source["plugin"].str == "compact") return
+        // 压缩检查点归压缩节点画，不进聊天流。
+        if (source["kind"].str == "compact-checkpoint") return
         val sourceKind = source["kind"].str ?: "user"
         val kind = when (sourceKind) {
             "user" -> if (claimedSteeringIds.contains(id)) "steering" else "user"
@@ -787,19 +787,17 @@ class SessionStore(val sessionId: SessionId) {
     private fun applyToolResult(event: SessionEvent, view: ToolEventView?) {
         val data = event.data ?: return
         val message = data["message"] ?: return
-        val callIdFromSource = message["source"]["callId"].str ?: return
-        val rawBlocks = message["content"].arr ?: emptyList()
-        val decoded = rawBlocks.map { decodeContentBlock(it) }
-        val wrappers = decoded.filterIsInstance<ContentBlock.ToolResult>()
-        val content = if (wrappers.isEmpty()) decoded else wrappers.flatMap { it.content }
-        val wrappedCallId = wrappers.firstOrNull()?.toolCallId ?: callIdFromSource
+        // 0.1.7 的 tool 角色消息：content 就是结果本身，失败标记挂在消息上，
+        // 调用 id 以 toolCallId 为准（source.callId 仍在，作兜底）。
+        val callId = message["toolCallId"].str ?: message["source"]["callId"].str ?: return
+        val content = (message["content"].arr ?: emptyList()).map { decodeContentBlock(it) }
         val errorObj = data["error"]
         val error = errorObj?.let { ToolError(it["name"].str ?: "", it["code"].str ?: "") }
         val result = ToolResultData(
             seq = event.seq,
             time = event.time,
             content = content,
-            isError = error != null || wrappers.any { it.isError },
+            isError = error != null || message["isError"].bool == true,
             error = error,
             meta = data["meta"],
             resultView = if (view?.target == "result") view.view else null,
@@ -808,14 +806,14 @@ class SessionStore(val sessionId: SessionId) {
         // `seq-<seq>`（见 applyToolCall），所以结果这端不能拿空串去查——那样既接不上
         // 真正的调用（它永远停在"没有结果"），又会在 `tool-call:` 这把键上反复互相
         // 覆盖，最后只剩一条孤儿行。对齐 Mac：挑最近一条还没有结果的工具调用接上去。
-        val key = if (wrappedCallId.isEmpty()) {
+        val key = if (callId.isEmpty()) {
             contexts.entries
                 .mapNotNull { (k, v) -> (v as? NodeContext.Tool)?.let { k to it.data } }
                 .filter { it.second.result == null }
                 .maxByOrNull { it.second.startSeq }
                 ?.first
         } else {
-            "tool-call:$wrappedCallId"
+            "tool-call:$callId"
         }
         val existing = key?.let { contexts[it] as? NodeContext.Tool }
         if (existing != null && key != null) {
@@ -827,7 +825,7 @@ class SessionStore(val sessionId: SessionId) {
         }
         // 一条都接不上时才另起一行；id 必须唯一（Mac 用 `orphan-<seq>`），否则多条
         // 孤儿结果会挤在同一把键上，只剩最后一条可见。
-        val orphanId = wrappedCallId.ifEmpty { "orphan-" + event.seq }
+        val orphanId = callId.ifEmpty { "orphan-" + event.seq }
         contexts["tool-call:$orphanId"] = NodeContext.Tool(
             ToolChatData(
                 callId = orphanId,
@@ -1640,7 +1638,8 @@ class SessionStore(val sessionId: SessionId) {
         if (queue != items) queue = items
     }
 
-    fun setJobs(frame: SessionJobsFrame) { jobs = frame.jobs }
+    /** `job/list` 流的整表快照（0.1.7 起任务不再随 control 流下发）。 */
+    fun replaceJobs(rows: List<JobView>) { jobs = rows }
 
     companion object {
         private const val MAX_REPAIR_BUFFER = 10_000
@@ -1678,9 +1677,9 @@ private fun contextProvenance(source: JsonElement?): Pair<String, String?> {
     return when (kind) {
         "session-reference" -> "recall" to (collect("references", "label") ?: kind)
         "agent-instructions" -> "inject" to (collect("changes", "path") ?: kind)
-        "plugin" -> "inject" to (source["plugin"].str ?: kind)
         "skill-invocation" -> "inject" to (source["name"].str ?: kind)
-        else -> "inject" to kind
+        // 未知来源按自己的 kind 标注；迁移过来的第三方插件来源写作 `plugin:<name>`。
+        else -> "inject" to kind.removePrefix("plugin:")
     }
 }
 

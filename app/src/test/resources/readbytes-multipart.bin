@@ -1,0 +1,12 @@
+------formdata-undici-057360852735
+Content-Disposition: form-data; name="bytes-0"; filename="blob"
+Content-Type: application/octet-stream
+
+pluginManagement {
+    repositories {
+        maven("https://mav
+------formdata-undici-057360852735
+Content-Disposition: form-data; name="metadata"
+
+{"type":"server-response","rpcId":"x1","result":{"ok":true,"value":{"absolutePath":"/Users/user/dshapp/dsh-androidapp/settings.gradle.kts","version":"16777233:99777236:574:1789483688511058723:1789483688518524771","bytes":574,"offset":0,"data":null,"eof":false}},"attachments":[{"path":["data"],"codec":"bytes","part":"bytes-0"}]}
+------formdata-undici-057360852735--

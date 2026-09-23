@@ -199,11 +199,11 @@ fun SessionListScreen(
     // 重新分组、排序一遍，白烧一帧。
     val groups: List<SessionGroup> = if (searching) emptyList() else remember(
         listed, groupBy, orderBy, model.workspaceStore.workspaces,
-        model.listStore.pinnedSessionOrder, erroredIds,
+        model.workspaceStore.pinnedSessionIds, erroredIds,
     ) {
         val result = mutableListOf<SessionGroup>()
-        val pinnedIds = model.listStore.pinnedSessionIds
-        val pinned = model.listStore.pinnedOrder(listed)
+        val pinnedIds = model.workspaceStore.pinnedSessionSet
+        val pinned = model.workspaceStore.pinnedOrder(listed)
         if (pinned.isNotEmpty()) {
             result.add(SessionGroup("pinned", Strings.pinned, pinned))
         }
@@ -771,7 +771,7 @@ private fun SessionRow(
 ) {
     val scope = rememberCoroutineScope()
     var menu by remember { mutableStateOf(false) }
-    val pinned = model.listStore.pinnedSessionIds.contains(summary.sessionId)
+    val pinned = model.workspaceStore.pinnedSessionIds.contains(summary.sessionId)
     val haptics = LocalHapticFeedback.current
 
     // 行上只有两种手势：点击进入会话、长按弹出操作菜单。左滑不再承载任何动作，避免误触。
@@ -802,7 +802,7 @@ private fun SessionRow(
             DropdownMenuItem(
                 text = { Text(if (pinned) Strings.unpin else Strings.pin) },
                 leadingIcon = { Icon(Icons.Default.PushPin, null) },
-                onClick = { menu = false; model.listStore.setPinned(summary.sessionId, !pinned) },
+                onClick = { menu = false; model.setPinned(summary.sessionId, !pinned) },
             )
             DropdownMenuItem(
                 text = { Text(Strings.rename) },
@@ -828,7 +828,7 @@ private fun StatusGlyph(model: PhoneModel, summary: SessionSummary) {
             Icon(Icons.Default.PanTool, null, Modifier.size(16.dp), Color(0xFFE08600))
         store?.unreadError == true ->
             Icon(Icons.Default.Error, null, Modifier.size(16.dp), MaterialTheme.colorScheme.error)
-        model.listStore.pinnedSessionIds.contains(summary.sessionId) ->
+        model.workspaceStore.pinnedSessionIds.contains(summary.sessionId) ->
             Icon(Icons.Default.PushPin, null, Modifier.size(16.dp), MaterialTheme.colorScheme.outline)
         else -> Icon(
             Icons.AutoMirrored.Filled.Chat, null, Modifier.size(16.dp), MaterialTheme.colorScheme.outline,

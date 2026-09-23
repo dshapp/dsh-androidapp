@@ -26,9 +26,7 @@ import ai.deepseek.dshphone.model.SessionSearchValue
 import ai.deepseek.dshphone.model.SessionSelectModelValue
 import ai.deepseek.dshphone.model.SkillListValue
 import ai.deepseek.dshphone.model.SubagentAddress
-import ai.deepseek.dshphone.model.SubagentListEntry
-import ai.deepseek.dshphone.model.SubagentListValue
-import ai.deepseek.dshphone.model.SubagentMode
+import ai.deepseek.dshphone.model.SubagentCatalogEntry
 import ai.deepseek.dshphone.model.WorkspaceFileBytesValue
 import ai.deepseek.dshphone.model.WorkspaceFileTextValue
 import ai.deepseek.dshphone.model.WorkspaceOrderValue
@@ -227,9 +225,16 @@ suspend fun ApiClient.sessionAttachment(sessionId: SessionId, attachmentId: Atta
  * 能立刻把归档集合落进 WorkspaceStore / SessionListStore，不必等下一次
  * `workspace/follow` 帧——与 [workspaceUnarchiveSession] 同一形状。
  */
-suspend fun ApiClient.workspaceArchiveSession(sessionId: SessionId): List<SessionId> =
-    call("workspace/archiveSession", request { put("sessionId", sessionId) })
+suspend fun ApiClient.workspaceArchiveSession(sessionId: SessionId, stopActivity: Boolean = false): List<SessionId> =
+    call("workspace/archiveSession", request { put("sessionId", sessionId); if (stopActivity) put("stopActivity", true) })
         .let { value -> (value["archivedSessionIds"].arr ?: emptyList()).mapNotNull { it.str } }
+
+/**
+ * 置顶/取消置顶一条会话（0.1.7 起置顶存在主机上），返回落定后的完整置顶集，最近置顶的在前。
+ */
+suspend fun ApiClient.workspaceSetPinned(sessionId: SessionId, pinned: Boolean): List<SessionId> =
+    call(if (pinned) "workspace/pinSession" else "workspace/unpinSession", request { put("sessionId", sessionId) })
+        .let { value -> (value["pinnedSessionIds"].arr ?: emptyList()).mapNotNull { it.str } }
 
 // —— 每轮改动文件（0.1.6 的 ui-deliverables 路由） —————————————————
 
@@ -292,7 +297,7 @@ suspend fun ApiClient.workspaceFileRead(sessionId: SessionId, path: String, offs
     ).decodeOrNull<WorkspaceFileTextValue>() ?: throw internalError("file read failed")
 
 /**
- * 读回一个工作区文件的字节窗口（base64），用于把图片交给系统查看器。
+ * 读回一个工作区文件的字节窗口（[ApiClient.call] 把 multipart 字节还原成 base64），用于把图片交给系统查看器。
  * 主机 readBytes 的单窗口上限默认 2 MiB，靠 [WorkspaceFileBytesValue.eof] 分片读完，
  * 避免为了打开一张图一次拉回整份文件（readAll 上限 32 MiB，base64 后还要再涨三分之一）。
  */
@@ -307,7 +312,10 @@ suspend fun ApiClient.workspaceFileReadBytes(
         buildJsonObject {
             put("workspaceFileScopeId", sessionId)
             put("path", path)
-            put("range", buildJsonObject { put("offset", offset); put("length", length) })
+            // 0.1.7 把字节窗口挪进了 options.range（同层还可带 baseFile）；字节走 multipart 回来。
+            put("options", buildJsonObject {
+                put("range", buildJsonObject { put("offset", offset); put("length", length) })
+            })
         },
     ).decodeOrNull<WorkspaceFileBytesValue>() ?: throw internalError("file read failed")
 
@@ -418,30 +426,29 @@ suspend fun ApiClient.goalEdit(sessionId: SessionId, ref: GoalRef, objective: St
 
 // —— 子智能体 ————————————————————————————————————————————————
 
-suspend fun ApiClient.subagentList(parentSessionId: SessionId): SubagentListValue {
-    val value = call("subagents/list", buildJsonObject { put("parentSessionId", parentSessionId) })
-    val entries = (value["entries"].arr ?: emptyList()).mapNotNull { entry ->
-        val id = entry["id"].str ?: return@mapNotNull null
-        when (entry["kind"].str) {
-            "child" -> SubagentListEntry(
-                sessionId = id,
-                isChild = true,
-                mode = if (entry["mode"].str == "continuable") SubagentMode.CONTINUABLE else SubagentMode.ONE_SHOT,
-                running = entry["activity"].str == "running",
-                hasChildren = entry["hasChildren"].bool ?: false,
-                label = entry["label"].str,
-            )
-            "diagnostic" -> SubagentListEntry(id, isChild = false, reason = entry["reason"].str)
-            else -> null
-        }
-    }
-    return SubagentListValue(entries, value["parentAvailable"].bool ?: false)
+/** 请求停止一个后台任务（0.1.7 `job/kill`）；已结束的任务主机答 `already-finished`，不算失败。 */
+suspend fun ApiClient.jobKill(sessionId: SessionId, jobId: String) {
+    call("job/kill", request { put("sessionId", sessionId); put("jobId", jobId) })
 }
 
-suspend fun ApiClient.subagentPrompt(address: SubagentAddress, text: String, clientTimeZone: String?) {
+/**
+ * 父会话的直接子会话，读自它的 `subagentCatalog` 投影（`session/projections` 不会激活父会话的
+ * Agent）。0.1.7 删掉了 `subagents/list`；会话不存在时主机返回 null，这里按空表处理。
+ */
+suspend fun ApiClient.subagentCatalog(parentSessionId: SessionId): List<SubagentCatalogEntry> =
+    (call("session/projections", request { put("sessionId", parentSessionId) })["values"]["subagentCatalog"].arr
+        ?: emptyList()).mapNotNull { it.decodeOrNull<SubagentCatalogEntry>() }
+
+/**
+ * 给可继续的子会话发一条消息。`requestId` 由客户端预先生成、随消息落库；
+ * `delivery` 为 `queue`（排到下一轮）或 `steer`（插进最近的步骤边界），两者主机都要求必填。
+ */
+suspend fun ApiClient.subagentPrompt(address: SubagentAddress, text: String, clientTimeZone: String?, steer: Boolean = false) {
     call(
         "subagents/prompt",
         request {
+            put("requestId", java.util.UUID.randomUUID().toString())
+            put("delivery", if (steer) "steer" else "queue")
             put("parentSessionId", address.parentSessionId)
             put("childSessionId", address.childSessionId)
             put("mode", address.mode.wire)

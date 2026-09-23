@@ -198,7 +198,14 @@ fun rowsFromInbox(value: SessionInboxValue): List<QueuedInboxItem> {
 
 data class SessionQueueFrame(val sessionId: SessionId, val items: List<QueuedInboxItem>)
 
-data class SessionJobsFrame(val sessionId: SessionId, val jobs: List<JobView>)
+/**
+ * 一帧 `job/list`（0.1.7 起按会话单独订阅）：这条会话此刻能看到的全部后台任务，
+ * 每次生命周期变化整表替换。不是 `rows` 帧时返回 null。
+ */
+fun decodeJobListFrame(value: JsonElement?): List<JobView>? {
+    if (value["type"].str != "rows") return null
+    return (value["jobs"].arr ?: emptyList()).mapNotNull { it.decodeOrNull<JobView>() }
+}
 
 data class SessionProjectionFrame(val sessionId: SessionId, val key: String, val value: JsonElement, val seq: Int)
 
@@ -233,11 +240,18 @@ fun decodeRemoteEventFrame(value: JsonElement?): RemoteEventFrame = when (value[
 // workspace/follow 流 ————————————————————————————————————————
 
 sealed interface WorkspaceFollowFrame {
-    data class Baseline(val items: List<WorkspaceView>, val archivedSessionIds: List<SessionId>) : WorkspaceFollowFrame
+    data class Baseline(
+        val items: List<WorkspaceView>,
+        val archivedSessionIds: List<SessionId>,
+        /** 0.1.7 起置顶存在主机上：全局置顶集，最近置顶的在前。 */
+        val pinnedSessionIds: List<SessionId>,
+    ) : WorkspaceFollowFrame
     data class Upsert(val workspace: WorkspaceView) : WorkspaceFollowFrame
     data class Remove(val workspaceId: WorkspaceId) : WorkspaceFollowFrame
     data class Order(val workspaceIds: List<WorkspaceId>) : WorkspaceFollowFrame
     data class Archived(val archivedSessionIds: List<SessionId>) : WorkspaceFollowFrame
+    /** 完整的置顶集，最近置顶的在前。 */
+    data class Pinned(val pinnedSessionIds: List<SessionId>) : WorkspaceFollowFrame
     data object Unknown : WorkspaceFollowFrame
 }
 
@@ -245,12 +259,14 @@ fun decodeWorkspaceFrame(value: JsonElement?): WorkspaceFollowFrame = when (valu
     "baseline" -> WorkspaceFollowFrame.Baseline(
         (value["value"]["items"].arr ?: emptyList()).mapNotNull { it.decodeOrNull<WorkspaceView>() },
         (value["value"]["archivedSessionIds"].arr ?: emptyList()).mapNotNull { it.str },
+        (value["value"]["pinnedSessionIds"].arr ?: emptyList()).mapNotNull { it.str },
     )
     "upsert" -> value["workspace"]?.decodeOrNull<WorkspaceView>()
         ?.let { WorkspaceFollowFrame.Upsert(it) } ?: WorkspaceFollowFrame.Unknown
     "remove" -> WorkspaceFollowFrame.Remove(value["workspaceId"].str ?: "")
     "order" -> WorkspaceFollowFrame.Order((value["workspaceIds"].arr ?: emptyList()).mapNotNull { it.str })
     "archived" -> WorkspaceFollowFrame.Archived((value["archivedSessionIds"].arr ?: emptyList()).mapNotNull { it.str })
+    "pinned" -> WorkspaceFollowFrame.Pinned((value["pinnedSessionIds"].arr ?: emptyList()).mapNotNull { it.str })
     else -> WorkspaceFollowFrame.Unknown
 }
 
@@ -259,11 +275,9 @@ fun decodeWorkspaceFrame(value: JsonElement?): WorkspaceFollowFrame = when (valu
 sealed interface SessionControlFrame {
     data class Baseline(
         val queues: Map<SessionId, List<QueuedInboxItem>>,
-        val jobs: Map<SessionId, List<JobView>>,
         val projections: Map<SessionId, SessionProjectionsBlock>,
     ) : SessionControlFrame
     data class Queue(val frame: SessionQueueFrame) : SessionControlFrame
-    data class Jobs(val frame: SessionJobsFrame) : SessionControlFrame
     data class Projection(val frame: SessionProjectionFrame) : SessionControlFrame
     data object Unknown : SessionControlFrame
 }
@@ -275,9 +289,6 @@ fun decodeControlFrame(value: JsonElement?): SessionControlFrame = when (value["
             queues = (v["queues"].obj ?: emptyMap()).mapValues { (_, items) ->
                 (items.arr ?: emptyList()).mapNotNull { decodeQueuedItem(it) }
             },
-            jobs = (v["jobs"].obj ?: emptyMap()).mapValues { (_, items) ->
-                (items.arr ?: emptyList()).mapNotNull { it.decodeOrNull<JobView>() }
-            },
             projections = (v["projections"].obj ?: emptyMap()).mapValues { (_, block) ->
                 block.decodeOrNull<SessionProjectionsBlock>() ?: SessionProjectionsBlock()
             },
@@ -287,12 +298,6 @@ fun decodeControlFrame(value: JsonElement?): SessionControlFrame = when (value["
         SessionQueueFrame(
             value["sessionId"].str ?: "",
             (value["items"].arr ?: emptyList()).mapNotNull { decodeQueuedItem(it) },
-        )
-    )
-    "jobs" -> SessionControlFrame.Jobs(
-        SessionJobsFrame(
-            value["sessionId"].str ?: "",
-            (value["jobs"].arr ?: emptyList()).mapNotNull { it.decodeOrNull<JobView>() },
         )
     )
     "projection" -> SessionControlFrame.Projection(

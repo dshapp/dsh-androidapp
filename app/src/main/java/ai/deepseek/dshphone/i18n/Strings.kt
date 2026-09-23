@@ -94,6 +94,10 @@ object Strings {
     val searchResults: String get() = pick("Results", "搜索结果")
     val rename: String get() = pick("Rename", "重命名")
     val archive: String get() = pick("Archive", "归档")
+    val archiveActiveTitle: String get() = pick("Stop running work and archive?", "停止运行中的任务并归档？")
+    val archiveActiveMessage: String get() =
+        pick("This session still has running work. Archiving will stop it first.", "该会话仍有任务在运行，归档会先停止它们。")
+    val stopAndArchive: String get() = pick("Stop and Archive", "停止并归档")
     val fork: String get() = pick("Fork session", "Fork 会话")
     /** 左滑动作条上的短标签，按钮只有几十 dp 宽，放不下完整措辞。 */
     val forkShort: String get() = pick("Fork", "分叉")
@@ -302,7 +306,7 @@ object Strings {
     val accessFullName: String get() = pick("Full access", "完全访问")
     val accessCustom: String get() = pick("Custom", "自定义")
     val presetStandardName: String get() = pick("Standard mode", "标准模式")
-    val presetCodeName: String get() = pick("Code mode", "PTC 模式")
+    val presetPtcName: String get() = pick("PTC mode", "PTC 模式")
     val presetMinimalName: String get() = pick("Minimal mode", "极简模式")
     val presetCordisName: String get() = pick("Creator mode", "创造模式")
     val presetUserTrust: String get() = pick("Custom", "自定义")

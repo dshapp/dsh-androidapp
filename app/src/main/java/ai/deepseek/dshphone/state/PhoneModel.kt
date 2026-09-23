@@ -227,6 +227,11 @@ class PhoneModel private constructor(app: Application) {
      */
     var unarchivingIds by mutableStateOf<Set<SessionId>>(emptySet())
         private set
+    /**
+     * 主机以 `workspace/session-active` 拒绝归档的那条会话：它还有任务在跑。
+     * 根视图据此弹确认框，确认后带 `stopActivity` 重试（对齐 Mac `archiveNeedsStop`）。
+     */
+    var archiveNeedsStop by mutableStateOf<SessionId?>(null)
 
     private var api: ApiClient? = null
     private var coordinator: StreamCoordinator? = null
@@ -965,10 +970,10 @@ class PhoneModel private constructor(app: Application) {
      * `listStore.remove`——摘要在名册里留着，归档页才拿得到标题与工作区名（与 Mac
      * `archiveSession` 先 `handleSessionsArchived` 再 `refreshSessions` 同一口径）。
      */
-    fun archive(sessionId: SessionId) {
+    fun archive(sessionId: SessionId, stopActivity: Boolean = false) {
         scope.launch {
             try {
-                val archived = api?.workspaceArchiveSession(sessionId) ?: return@launch
+                val archived = api?.workspaceArchiveSession(sessionId, stopActivity) ?: return@launch
                 workspaceStore.setArchived(archived)
                 // 本地这一次归档掉它的运行时 store：名册行留着给归档页，但没人在看的
                 // 会话流没必要继续挂着（再打开时会重新 `open()` 建回来）。
@@ -976,6 +981,21 @@ class PhoneModel private constructor(app: Application) {
                 // 传主机返回的完整集合：`handleSessionsArchived` 会把它同步进名册侧镜像，
                 // 只传刚归档的这一条会把别的已归档会话从镜像里挤掉。
                 handleSessionsArchived(archived)
+            } catch (e: ApiException) {
+                if (e.code == "workspace/session-active" && !stopActivity) archiveNeedsStop = sessionId
+                else lastErrorMessage = describe(e)
+            } catch (e: Exception) {
+                lastErrorMessage = describe(e)
+            }
+        }
+    }
+
+    /** 置顶/取消置顶；主机返回的完整置顶集直接落进 [WorkspaceStore]，不必等 follow 帧。 */
+    fun setPinned(sessionId: SessionId, pinned: Boolean) {
+        scope.launch {
+            try {
+                val ids = api?.workspaceSetPinned(sessionId, pinned) ?: return@launch
+                workspaceStore.setPinned(ids)
             } catch (e: Exception) {
                 lastErrorMessage = describe(e)
             }
@@ -1041,31 +1061,40 @@ class PhoneModel private constructor(app: Application) {
         }
     }
 
+    /** 停止一个后台任务；结果由 `job/list` 流带回来，这里不改本地状态。 */
+    fun killJob(sessionId: SessionId, jobId: String) {
+        scope.launch {
+            try { api?.jobKill(sessionId, jobId) } catch (e: Exception) { lastErrorMessage = describe(e) }
+        }
+    }
+
     // —— 子智能体 ——————————————————————————————————————————————
 
-    suspend fun loadSubagents(parentSessionId: SessionId): List<SubagentListEntry> =
-        runCatching { api?.subagentList(parentSessionId)?.entries }.getOrNull() ?: emptyList()
+    suspend fun loadSubagents(parentSessionId: SessionId): List<SubagentCatalogEntry> =
+        runCatching { api?.subagentCatalog(parentSessionId) }.getOrNull() ?: emptyList()
 
-    suspend fun openSubagent(
-        parentSessionId: SessionId,
-        entry: SubagentListEntry,
-        parentAvailable: Boolean,
-    ): SessionId? {
-        if (!entry.isChild) return null
-        val address = SubagentAddress(parentSessionId, entry.sessionId, entry.mode)
-        val store = store(entry.sessionId)
+    /** 子会话是否在跑：目录不带运行状态，取子会话自己的会话摘要。 */
+    fun subagentRunning(childSessionId: SessionId): Boolean =
+        sessions[childSessionId]?.running ?: listStore.sessionsById[childSessionId]?.running ?: false
+
+    suspend fun openSubagent(parentSessionId: SessionId, entry: SubagentCatalogEntry): SessionId? {
+        val childSessionId = entry.id
+        val address = SubagentAddress(parentSessionId, childSessionId, entry.mode)
+        val store = store(childSessionId)
+        // 父会话能否接消息取它自己的摘要（原 subagents/list 的 parentAvailable 提示）。
+        val parentAvailable = listStore.sessionsById[parentSessionId]?.agentAvailable ?: true
         store.configureSubagent(address, parentAvailable)
         entry.label?.let { store.title = it }
-        store.running = entry.running
-        selectedSessionId = entry.sessionId
+        store.running = subagentRunning(childSessionId)
+        selectedSessionId = childSessionId
         // 与 open() 同一条规矩：首屏只拉一份，follow 建不起来时才补分页。
         val following = coordinator?.follow(
-            entry.sessionId,
+            childSessionId,
             SessionAddress.Subagent(address),
             INITIAL_HISTORY_MESSAGES,
         ) == true
         if (!following && !store.historyLoaded) loadHistory(store)
-        return entry.sessionId
+        return childSessionId
     }
 
     suspend fun sendToSubagent(text: String, sessionId: SessionId): Boolean {

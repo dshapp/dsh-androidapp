@@ -36,7 +36,7 @@ class BlankSessionReuseTest {
         agentPreset = preset,
     )
 
-    private val liveCatalog = listOf(AgentPresetEntry(id = "standard", trust = "system"))
+    private val liveCatalog = listOf(AgentPresetEntry(id = "standard"))
 
     @Test
     fun aBlankUnderAMissingPresetIsNotReused() {
@@ -55,7 +55,7 @@ class BlankSessionReuseTest {
             listOf(blank("cordis")),
             workspace,
             emptySet(),
-            listOf(AgentPresetEntry(id = "cordis", trust = "system", broken = "plugin failed to load")),
+            listOf(AgentPresetEntry(id = "cordis", broken = "plugin failed to load")),
         )
         assertNull("已损坏的预设同样 resume 不了", reused)
     }

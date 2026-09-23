@@ -38,9 +38,8 @@ class ToolResultLinkageTest {
             event(
                 "tool/result", 11,
                 """
-                {"turn":1,"step":1,"message":{"source":{"kind":"tool","callId":""},
-                 "content":[{"type":"tool-result","toolCallId":"",
-                             "content":[{"type":"text","text":"ok"}],"isError":false}]}}
+                {"turn":1,"step":1,"message":{"role":"tool","source":{"kind":"tool","callId":""},
+                 "toolCallId":"","content":[{"type":"text","text":"ok"}],"isError":false}}
                 """.trimIndent(),
             ),
             null,
@@ -62,9 +61,8 @@ class ToolResultLinkageTest {
             event(
                 "tool/result", 11,
                 """
-                {"turn":1,"step":1,"message":{"source":{"kind":"tool","callId":""},
-                 "content":[{"type":"tool-result","toolCallId":"",
-                             "content":[{"type":"text","text":"stray"}],"isError":false}]}}
+                {"turn":1,"step":1,"message":{"role":"tool","source":{"kind":"tool","callId":""},
+                 "toolCallId":"","content":[{"type":"text","text":"stray"}],"isError":false}}
                 """.trimIndent(),
             ),
             null,

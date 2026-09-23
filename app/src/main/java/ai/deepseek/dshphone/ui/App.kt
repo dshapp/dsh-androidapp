@@ -12,8 +12,12 @@ import ai.deepseek.dshphone.ui.screen.OnboardingScreen
 import ai.deepseek.dshphone.ui.screen.PairingScreen
 import ai.deepseek.dshphone.ui.screen.SettingsScreen
 import ai.deepseek.dshphone.ui.screen.SessionListScreen
+import ai.deepseek.dshphone.i18n.Strings
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -129,6 +133,23 @@ fun DshApp(model: PhoneModel, launch: LaunchRequest?, onLaunchHandled: () -> Uni
                     val profile = model.profiles.add(name, payload)
                     scanning = false
                     if (profile != null) model.connect(profile)
+                },
+            )
+        }
+
+        model.archiveNeedsStop?.let { sessionId ->
+            AlertDialog(
+                onDismissRequest = { model.archiveNeedsStop = null },
+                title = { Text(Strings.archiveActiveTitle) },
+                text = { Text(Strings.archiveActiveMessage) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        model.archiveNeedsStop = null
+                        model.archive(sessionId, stopActivity = true)
+                    }) { Text(Strings.stopAndArchive) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { model.archiveNeedsStop = null }) { Text(Strings.cancel) }
                 },
             )
         }

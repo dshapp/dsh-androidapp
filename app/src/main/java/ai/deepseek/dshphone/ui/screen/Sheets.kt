@@ -443,7 +443,7 @@ fun SessionPanelSheet(
 ) {
     val scope = rememberCoroutineScope()
     val store = model.sessions[sessionId]
-    var subagents by remember { mutableStateOf<List<SubagentListEntry>>(emptyList()) }
+    var subagents by remember { mutableStateOf<List<SubagentCatalogEntry>>(emptyList()) }
 
     LaunchedEffect(sessionId) { subagents = model.loadSubagents(sessionId) }
 
@@ -486,6 +486,11 @@ fun SessionPanelSheet(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 if (job.isLive) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
                                 Text(job.status.wire, style = MaterialTheme.typography.labelSmall)
+                                if (job.status == JobStatus.RUNNING) {
+                                    IconButton(onClick = { model.killJob(sessionId, job.id) }) {
+                                        Icon(Icons.Default.Stop, Strings.stop)
+                                    }
+                                }
                             }
                         },
                     )
@@ -498,18 +503,18 @@ fun SessionPanelSheet(
                     ListItem(
                         modifier = Modifier.clickable {
                             scope.launch {
-                                model.openSubagent(sessionId, entry, true)?.let {
+                                model.openSubagent(sessionId, entry)?.let {
                                     onDismiss()
                                     onOpenSession(it)
                                 }
                             }
                         },
                         headlineContent = {
-                            Text(entry.label ?: entry.sessionId, maxLines = 1,
+                            Text(entry.label ?: entry.id, maxLines = 1,
                                 overflow = TextOverflow.Ellipsis)
                         },
                         trailingContent = {
-                            if (entry.running) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                            if (model.subagentRunning(entry.id)) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
                             else Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null)
                         },
                     )

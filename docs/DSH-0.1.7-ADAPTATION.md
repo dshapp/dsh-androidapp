@@ -43,3 +43,21 @@
 - 新增 `BinaryResponseTest`：夹具是 0.1.7-alpha.2 主机原样返回的 readBytes multipart 响应，用来验证字节能按 path 放回 `data`。
 - 已装到模拟器 `Pixel7_API34`，能正常启动，会话列表显示缓存。但本机桥接当前处于 `disabled`（操作者关掉了手机访问），
   模拟器也不在已配对设备里，所以隧道连不上，端到端实测还没做。
+
+## 四、第二轮：补齐 web 0.1.7 的新行为（对应 Mac `267bcde`、`7d3e1cd`）
+
+| # | 内容 | 安卓改法 |
+| - | ---- | -------- |
+| 1 | 聊天可见性（web `isVisibleChatNode`） | `system/message` 不再生成行（删掉系统提示卡片）；非人类的普通上下文注入不进聊天；`/permission` 命令行过滤掉。`ContextPresentation.kt` 与 `ChatNode.Context` 一并删除 |
+| 2 | 轮次触发通知（web `turn-trigger`） | `applyInboxSplice` 记下每个收件箱目标的当前认领（ids、seq、是否含人）；一条非人类消息在 `next-turn` 认领里，或是第 1 步的空闲插话（`next-step` 认领晚于本轮起点、本轮无 `next-turn` 认领、那批里没有人）时，画成 `ChatNode.TurnTrigger`，标题/图标按 `source.kind` 分（goal / agent-message / team-message / subagent-settled / webhook(github) / schedule / tool-jobs / cordis-host-runner）。它不折进过程组，且算一轮的开头 |
+| 3 | 历史窗口 | `session/page` 与 `session/follow` 都改带 `maxMessages:500` + `turnWindow:{minMessages, minTurns:2}`（`putHistoryWindow`），一页不再从一轮中间开始 |
+| 4 | 后台任务 | `JobView` 加 `progress`、`output{total,earliest}`；会话面板分「进行中 / 已结束」两段，已结束可折叠、可清空（本机隐藏）；停止前弹确认框，受理后转圈直到 job/list 把它移出 running；点行打开详情：状态、开始/结束、耗时、退出码（非 0 标红）、信号、详情，外加 `job/follow` 实时输出面板（opened/output/status 帧，尾部只留 128K 字符，带丢弃与中断提示） |
+| 5 | 排队消息编辑 | 编辑框改成多行，换行原样保留 |
+| 6 | 折叠分组 | 折叠时仍列出组里正在运行的会话 |
+| 7 | 本地路径图片（Mac `7d3e1cd`） | 单独成段的 `![](/abs/x.png)` 就地显示：Web/Mac 用 `GET /api/file`，手机隧道只放行 `/api/<ns>/<method>` 的 POST，所以改走 `workspaceFiles/readBytes` 分片落盘、按长边 2048 降采样解码（上限 16 MiB，LRU 24 张）；失败退回 alt 文字，点图仍交系统查看器。与文字混排的图片保持 alt 链接 |
+
+桌面/首次使用专属、这次不做：插件下载源与多语言元数据（手机没有插件页）、预设说明弹窗、`workspace/initializeDefault`。
+
+验证：`:app:compileDebugKotlin`、`:app:testDebugUnitTest` 通过（154 个用例，新增 `Web017ParityTest` 8 个：可见性、两种触发判定、permission 过滤、turnWindow 形状、退出码/信号拆分、job/follow 折叠）。
+装到 `Pixel7_API34` 能正常启动并显示缓存列表；隧道仍未连上主机，端到端未实测。
+注意：Gradle 8.9 不支持 Android Studio 自带的 JDK 25，本地构建请用 JDK 21（`/opt/homebrew/opt/openjdk@21`）。

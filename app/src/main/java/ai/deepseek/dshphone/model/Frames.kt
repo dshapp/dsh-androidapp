@@ -207,6 +207,68 @@ fun decodeJobListFrame(value: JsonElement?): List<JobView>? {
     return (value["jobs"].arr ?: emptyList()).mapNotNull { it.decodeOrNull<JobView>() }
 }
 
+/**
+ * 一条 `job/follow` 帧：先一个 `opened` 锚点，然后若干合并过的 `output` 批次，
+ * 任务结束且输出环读完后再来一个终止的 `status`。
+ */
+sealed interface JobFollowFrame {
+    /** [from]：第一批输出接着的偏移。 */
+    data class Opened(val job: JobView, val from: Long) : JobFollowFrame
+    /** [gap]：这一批之前或之中有字节已经被淘汰。 */
+    data class Output(val text: String, val gap: Boolean) : JobFollowFrame
+    data class Status(val job: JobView) : JobFollowFrame
+    data object Unknown : JobFollowFrame
+}
+
+fun decodeJobFollowFrame(value: JsonElement?): JobFollowFrame = when (value["type"].str) {
+    "opened" -> {
+        val job = value["job"]?.decodeOrNull<JobView>()
+        val from = value["from"].dbl?.toLong()
+        if (job != null && from != null) JobFollowFrame.Opened(job, from) else JobFollowFrame.Unknown
+    }
+    "output" -> {
+        val chunks = value["chunks"].arr ?: emptyList()
+        JobFollowFrame.Output(
+            text = chunks.joinToString("") { it["text"].str ?: "" },
+            gap = value["lossy"].bool == true || chunks.any { it["gapBefore"].bool == true },
+        )
+    }
+    "status" -> value["job"]?.decodeOrNull<JobView>()?.let { JobFollowFrame.Status(it) } ?: JobFollowFrame.Unknown
+    else -> JobFollowFrame.Unknown
+}
+
+/** 正在观察的那一个后台任务的输出（web `ObservedJob`）：保留的尾部、是否丢过更早的字节、流的状态。 */
+data class ObservedJobOutput(
+    val sessionId: SessionId,
+    val jobId: String,
+    val text: String = "",
+    val gapBefore: Boolean = false,
+    val streaming: Boolean = true,
+    val error: String? = null,
+) {
+    companion object {
+        /** web `RENDER_TAIL_LIMIT`：只留最新的 128K 个字符。 */
+        const val TAIL_LIMIT = 128 * 1024
+    }
+
+    fun folding(frame: JobFollowFrame): ObservedJobOutput = when (frame) {
+        // 重开（重连）会从最早保留的字节重放，所以锚点一到就从头来过。
+        is JobFollowFrame.Opened -> copy(
+            text = "",
+            gapBefore = frame.from > 0 || frame.from < (frame.job.output?.earliest ?: 0),
+            streaming = true,
+            error = null,
+        )
+        is JobFollowFrame.Output -> {
+            val joined = text + frame.text
+            if (joined.length > TAIL_LIMIT) copy(text = joined.takeLast(TAIL_LIMIT), gapBefore = true)
+            else copy(text = joined, gapBefore = gapBefore || frame.gap)
+        }
+        is JobFollowFrame.Status -> copy(streaming = false)
+        JobFollowFrame.Unknown -> this
+    }
+}
+
 data class SessionProjectionFrame(val sessionId: SessionId, val key: String, val value: JsonElement, val seq: Int)
 
 // $events 流 ——————————————————————————————————————————————————

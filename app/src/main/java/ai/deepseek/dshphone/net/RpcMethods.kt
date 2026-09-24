@@ -84,6 +84,23 @@ private fun QueueAction.toJson(): JsonElement = when (this) {
 private fun request(block: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit): JsonElement =
     buildJsonObject { put("request", buildJsonObject(block)) }
 
+/** 按轮次对齐的历史窗口里最多带多少条消息（web session-controller `HISTORY_PAGE_OPTIONS.maxMessages`）。 */
+const val HISTORY_WINDOW_MESSAGE_CAP = 500
+
+/**
+ * 写入按轮次对齐的历史窗口（0.1.7，web `HISTORY_PAGE_OPTIONS`）：至少 [minMessages] 条消息、
+ * 至少跨两个轮次起点，主机会把一页扩到下一个轮次边界，所以一页不会从一轮中间开始；
+ * 上限 [HISTORY_WINDOW_MESSAGE_CAP] 条。`session/page` 与 `session/follow` 共用。
+ */
+fun kotlinx.serialization.json.JsonObjectBuilder.putHistoryWindow(minMessages: Int) {
+    val minimum = minMessages.coerceIn(1, HISTORY_WINDOW_MESSAGE_CAP)
+    put("maxMessages", HISTORY_WINDOW_MESSAGE_CAP)
+    put("turnWindow", buildJsonObject {
+        put("minMessages", minimum)
+        put("minTurns", 2)
+    })
+}
+
 // —— session ——————————————————————————————————————————————————
 
 /**
@@ -125,7 +142,7 @@ suspend fun ApiClient.sessionPage(
         put("address", address.toJson())
         put("throughSeq", throughSeq)
         beforeSeq?.let { put("beforeSeq", it) }
-        maxMessages?.let { put("maxMessages", it) }
+        maxMessages?.let { putHistoryWindow(it) }
     },
 ).decodeOrNull<SessionPageValue>() ?: SessionPageValue()
 

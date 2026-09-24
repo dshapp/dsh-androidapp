@@ -4,7 +4,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,6 +34,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -144,6 +150,8 @@ private class MarkdownScope(
     val findQuery: String,
     /** 命中字的行内样式；不在查找态时为 null。 */
     val findStyle: SpanStyle?,
+    /** 读回本地路径图片的位图；为 null 时图片语法只画成可点开的 alt 文字。 */
+    val loadImage: (suspend (ai.deepseek.dshphone.model.FileLinkTarget) -> android.graphics.Bitmap?)?,
 )
 
 /**
@@ -164,11 +172,13 @@ fun MarkdownText(
     findQuery: String = "",
     /** 这一块所属的行是否查找栏当前停靠的命中行。 */
     findActive: Boolean = false,
+    /** 单独成段的本地路径图片（`![](/abs/shot.png)`）用它取位图就地显示；不传则只画 alt 链接。 */
+    loadImage: (suspend (ai.deepseek.dshphone.model.FileLinkTarget) -> android.graphics.Bitmap?)? = null,
 ) {
     val doc = remember(text) { parseMarkdown(text) }
     val findStyle = if (findQuery.isBlank()) null else findSpanStyle(findActive)
-    val scope = remember(doc, fileMentions, onOpenFile, onOpenLink, findQuery, findStyle) {
-        MarkdownScope(doc.tasks, fileMentions, onOpenFile, onOpenLink, findQuery, findStyle)
+    val scope = remember(doc, fileMentions, onOpenFile, onOpenLink, findQuery, findStyle, loadImage) {
+        MarkdownScope(doc.tasks, fileMentions, onOpenFile, onOpenLink, findQuery, findStyle, loadImage)
     }
     Column(modifier = modifier.fillMaxWidth()) {
         RenderBlocks(doc.document, scope, depth = 0, compact = false)
@@ -269,7 +279,16 @@ private fun RenderBlock(
 ) {
     when (node) {
         is Heading -> Text(inlineText(node, scope), modifier, style = headingStyle(node.level))
-        is Paragraph -> Text(inlineText(node, scope), modifier, style = bodyStyle())
+        is Paragraph -> {
+            val images = standaloneImages(node, scope)
+            if (images != null) {
+                Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    images.forEach { (image, target) -> InlineImage(image, target, scope) }
+                }
+            } else {
+                Text(inlineText(node, scope), modifier, style = bodyStyle())
+            }
+        }
         is FencedCodeBlock -> CodeBlock(
             node.literal.trimEnd('\n'),
             node.info?.trim()?.substringBefore(' ')?.takeIf { it.isNotEmpty() },
@@ -687,4 +706,101 @@ private inline fun androidx.compose.ui.text.AnnotatedString.Builder.withStyleSpa
     pushStyle(style)
     block()
     pop()
+}
+
+/* -------------------------------------------------------------- 本地路径图片 */
+
+/**
+ * 一段只由图片语法组成（中间只有空白与换行）、且每张都指向工作区图片文件时，
+ * 返回这些图片与它们的落点；否则 null，照常按文字排。
+ *
+ * 对齐 Web `.image` 规则：单独成段的图片按原始尺寸显示、宽度不超过列宽。
+ * 与文字混排的图片仍是 alt 文字链接（点开交给系统查看器）。
+ */
+private fun standaloneImages(
+    paragraph: Paragraph,
+    scope: MarkdownScope,
+): List<Pair<Image, ai.deepseek.dshphone.model.FileLinkTarget>>? {
+    if (scope.loadImage == null) return null
+    val out = mutableListOf<Pair<Image, ai.deepseek.dshphone.model.FileLinkTarget>>()
+    var child = paragraph.firstChild
+    while (child != null) {
+        when (child) {
+            is Image -> {
+                val target = FileLink.parse(child.destination) ?: return null
+                if (!ImageFileType.isImage(target.path)) return null
+                out.add(child to target)
+            }
+            is SoftLineBreak, is HardLineBreak -> Unit
+            is MdText -> if (child.literal.isNotBlank()) return null
+            else -> return null
+        }
+        child = child.next
+    }
+    return out.takeIf { it.isNotEmpty() }
+}
+
+private fun altText(image: Image): String {
+    val builder = StringBuilder()
+    fun walk(node: Node?) {
+        var current = node
+        while (current != null) {
+            if (current is MdText) builder.append(current.literal)
+            walk(current.firstChild)
+            current = current.next
+        }
+    }
+    walk(image.firstChild)
+    return builder.toString()
+}
+
+/** 就地显示一张工作区图片：加载中占位，失败退回 alt 文字；点一下交给系统查看器。 */
+@Composable
+private fun InlineImage(image: Image, target: ai.deepseek.dshphone.model.FileLinkTarget, scope: MarkdownScope) {
+    val loader = scope.loadImage ?: return
+    val state by produceState<InlineImageState>(InlineImageState.Loading, target) {
+        value = loader(target)?.let { InlineImageState.Ready(it) } ?: InlineImageState.Failed
+    }
+    val alt = altText(image).ifBlank { target.path.substringAfterLast('/') }
+    val open = scope.onOpenLink?.let { handler -> { handler(target) } }
+    val clickable = if (open != null) Modifier.clickable(onClick = open) else Modifier
+    when (val current = state) {
+        InlineImageState.Loading -> Box(
+            Modifier
+                .size(width = 160.dp, height = 96.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(blockSurface()),
+            contentAlignment = Alignment.Center,
+        ) { CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) }
+        InlineImageState.Failed -> Text(
+            alt,
+            clickable,
+            style = bodyStyle(),
+            fontStyle = FontStyle.Italic,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        is InlineImageState.Ready -> {
+            val bitmap = current.bitmap
+            // 原始尺寸（Web 的 CSS px 在这里就是 dp），宽度不超过列宽。
+            val natural = bitmap.width.dp
+            androidx.compose.foundation.Image(
+                bitmap.asImageBitmap(),
+                contentDescription = alt,
+                modifier = Modifier
+                    .widthIn(max = natural)
+                    .fillMaxWidth()
+                    .aspectRatio(bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1))
+                    .clip(RoundedCornerShape(8.dp))
+                    .then(clickable),
+                alignment = Alignment.TopStart,
+                contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+            )
+        }
+    }
+}
+
+private sealed interface InlineImageState {
+    data object Loading : InlineImageState
+    data object Failed : InlineImageState
+    data class Ready(val bitmap: android.graphics.Bitmap) : InlineImageState
 }

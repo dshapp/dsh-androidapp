@@ -181,9 +181,17 @@ class SessionStore(val sessionId: SessionId) {
     private var currentTurn = 0
     private val activeSteps = mutableSetOf<Int>()
     private val stepStartTimes = mutableMapOf<String, Double>()
+    /** 每轮 `turn/start` 的 seq：判断空闲插话是否唤醒了本轮时要用到本轮起点。 */
     private val turnStartSeqs = mutableMapOf<Int, Int>()
-    private val stepStartSeqs = mutableMapOf<String, Int>()
-    private var sawSystemPrompt = false
+    /** `currentTurn` 里最近开始的步骤。 */
+    private var currentStep = 0
+    /**
+     * 每个收件箱目标当前的认领（web `InboxState`）：最近一次未取消的移除拿走了哪些 id、
+     * 发生在哪个 seq、其中有没有人发的消息。之后再插入同一个 id 会把它从认领里去掉。
+     */
+    private val inboxClaims = mutableMapOf<String, InboxClaim>()
+    /** 来源是人的收件箱消息 id，认领时据此判断这一批里有没有人。 */
+    private val humanInboxIds = mutableSetOf<MessageId>()
     private val turnEndBoundaries = mutableListOf<Pair<Int, Double>>()
     private val presentedByTurn = mutableMapOf<Int, MutableList<PresentedFile>>()
     /** 每轮最新的 `workspace/changes` 公告 seq（见 [changesAddress]）。 */
@@ -507,8 +515,9 @@ class SessionStore(val sessionId: SessionId) {
         claimedSteeringIds.clear()
         stepStartTimes.clear()
         turnStartSeqs.clear()
-        stepStartSeqs.clear()
-        sawSystemPrompt = false
+        currentStep = 0
+        inboxClaims.clear()
+        humanInboxIds.clear()
         turnEndBoundaries.clear()
         currentTurn = 0
         activeSteps.clear()
@@ -556,7 +565,9 @@ class SessionStore(val sessionId: SessionId) {
             "deliverables/presented" -> applyPresented(event)
             // 只带轮次，本身不画任何东西：汇总与 diff 要按这条事件的 seq 去主机读。
             "workspace/changes" -> applyWorkspaceChanges(event)
-            "system/message" -> applySystemPrompt(event)
+            // 0.1.7 起聊天里不画系统提示（web `isVisibleChatNode`），轨迹页才看；
+            // 在这里认领掉，免得落进未知 surface 的兜底卡片。
+            "system/message" -> Unit
             else -> applyUnknownSurface(event)
         }
     }
@@ -568,34 +579,6 @@ class SessionStore(val sessionId: SessionId) {
     }
 
     private fun isReplacementSurface(event: SessionEvent): Boolean = event.surfaceOp["op"].str == "replace"
-
-    private fun applySystemPrompt(event: SessionEvent) {
-        if (!isAppendSurface(event)) return
-        val content = event.data["message"]["content"].arr ?: return
-        val text = content.filter { it["type"].str == "text" }.mapNotNull { it["text"].str }.joinToString("")
-        if (text.isEmpty()) return
-        val update = sawSystemPrompt
-        sawSystemPrompt = true
-        val turn = event.data["turn"].int
-        val step = event.data["step"].int
-        contexts["system-prompt:${event.seq}"] = NodeContext.Finalized(
-            ChatNode.SystemPrompt(
-                SystemPromptChatNode(
-                    seq = event.seq,
-                    time = event.time,
-                    anchorSeq = if (update) event.seq else systemPromptAnchor(event, turn, step),
-                    text = text,
-                    update = update,
-                )
-            )
-        )
-    }
-
-    private fun systemPromptAnchor(event: SessionEvent, turn: Int?, step: Int?): Int {
-        if (turn == null || step == null) return event.seq
-        if (step == 1) turnStartSeqs[turn]?.let { return it }
-        return stepStartSeqs["$turn:$step"] ?: turnStartSeqs[turn] ?: event.seq
-    }
 
     private fun applyUnknownSurface(event: SessionEvent) {
         if (!isAppendSurface(event)) return
@@ -618,7 +601,32 @@ class SessionStore(val sessionId: SessionId) {
         repeat(removalCount) { pending.removeAt(boundedStart) }
         pending.addAll(boundedStart, insertedIds)
         claimedSteeringIds.removeAll(insertedIds.toSet())
-        if (target == "next-step" && data["outcome"].str != "canceled") claimedSteeringIds.addAll(removed)
+        val claimed = removalCount > 0 && data["outcome"].str != "canceled"
+        if (claimed) {
+            if (target == "next-step") claimedSteeringIds.addAll(removed)
+            val human = removed.any { humanInboxIds.contains(it) }
+            inboxClaims[target] = InboxClaim(removed.toMutableSet(), event.seq, human)
+        } else {
+            inboxClaims[target]?.ids?.removeAll(insertedIds.toSet())
+        }
+        for (entry in inserted) {
+            val id = entry["id"].str ?: continue
+            if (entry["source"]["kind"].str == "user") humanInboxIds.add(id)
+        }
+    }
+
+    /**
+     * 一条非人类消息是否唤醒了它所在的一轮（web `message.ts` 的 `waking`）：它在当前
+     * `next-turn` 认领里；或者它是一次空闲插话——本轮起点已载入、处于第 1 步、`next-step`
+     * 认领发生在本轮起点之后、本轮没有 `next-turn` 认领、那一批里也没有人发的消息。
+     */
+    private fun isWaking(id: MessageId): Boolean {
+        if (inboxClaims["next-turn"]?.ids?.contains(id) == true) return true
+        if (currentTurn == 0 || currentStep != 1) return false
+        val turnStart = turnStartSeqs[currentTurn] ?: return false
+        val step = inboxClaims["next-step"] ?: return false
+        if (step.seq <= turnStart || step.human || !step.ids.contains(id)) return false
+        return (inboxClaims["next-turn"]?.seq ?: -1) < turnStart
     }
 
     private fun applyUserMessage(event: SessionEvent) {
@@ -631,20 +639,16 @@ class SessionStore(val sessionId: SessionId) {
         // 压缩检查点归压缩节点画，不进聊天流。
         if (source["kind"].str == "compact-checkpoint") return
         val sourceKind = source["kind"].str ?: "user"
-        val kind = when (sourceKind) {
-            "user" -> if (claimedSteeringIds.contains(id)) "steering" else "user"
-            else -> "context"
-        }
         if (sourceKind == "session-reference") noteReferencedSessions(source)
-        val node: ChatNode = when (kind) {
-            "steering" -> ChatNode.Steering(event.seq, event.time, id, content)
-            "context" -> {
-                val provenance = contextProvenance(source)
-                ChatNode.Context(event.seq, event.time, id, content, source, provenance.second, provenance.first)
-            }
-            else -> ChatNode.User(event.seq, event.time, id, content)
+        val node: ChatNode = when {
+            sourceKind == "user" ->
+                if (claimedSteeringIds.contains(id)) ChatNode.Steering(event.seq, event.time, id, content)
+                else ChatNode.User(event.seq, event.time, id, content)
+            isWaking(id) -> ChatNode.TurnTrigger(TurnTriggerNode(event.seq, event.time, id, content, source))
+            // 0.1.7 起普通上下文注入不进聊天（web `isVisibleChatNode`），轨迹页才看。
+            else -> return
         }
-        contexts["$kind:$id"] = NodeContext.Finalized(node)
+        contexts[node.nodeId] = NodeContext.Finalized(node)
     }
 
     /** 记下一条 recall 上下文里的 label → sessionId，供用户气泡把标题点成跳转。 */
@@ -917,6 +921,7 @@ class SessionStore(val sessionId: SessionId) {
     private fun applyTurnStart(event: SessionEvent) {
         val turn = event.data["turn"].int ?: return
         currentTurn = turn
+        currentStep = 0
         turnStartSeqs[turn] = event.seq
         running = true
         lastTurnErrored = false
@@ -933,9 +938,9 @@ class SessionStore(val sessionId: SessionId) {
     private fun applyStepStart(event: SessionEvent) {
         val step = event.data["step"].int ?: return
         activeSteps.add(step)
+        currentStep = step
         if (currentTurn == 0) return
         stepStartTimes["$currentTurn:$step"] = event.time
-        stepStartSeqs["$currentTurn:$step"] = event.seq
         val key = assistantStepKey(currentTurn, step)
         (contexts[key] as? NodeContext.Assistant)?.let { ctx ->
             val state = ctx.state.copyState()
@@ -1323,7 +1328,8 @@ class SessionStore(val sessionId: SessionId) {
                     )
                 }
                 is NodeContext.MaxTokens -> built.add(ChatNode.TurnMaxTokens(ctx.node))
-                is NodeContext.Command -> built.add(ChatNode.Command(ctx.node))
+                // 切换权限模式的命令是界面外壳，聊天里不画（web `isVisibleChatNode`）。
+                is NodeContext.Command -> if (ctx.node.name != "permission") built.add(ChatNode.Command(ctx.node))
                 is NodeContext.Tail -> built.add(ChatNode.TurnTail(ctx.data))
                 is NodeContext.Workflow -> built.add(ChatNode.Workflow(projectWorkflow(ctx.state)))
             }
@@ -1413,7 +1419,8 @@ class SessionStore(val sessionId: SessionId) {
         val pendingAnchors = mutableListOf<Double>()
 
         for (node in rows) {
-            if (node is ChatNode.User || node is ChatNode.Steering) {
+            // 人发的消息和轮次触发通知都是新一轮的开头，之后的行不能再记到前一轮。
+            if (node is ChatNode.User || node is ChatNode.Steering || node is ChatNode.TurnTrigger) {
                 openTurn = null
                 pendingAnchors.clear()
                 continue
@@ -1447,7 +1454,7 @@ class SessionStore(val sessionId: SessionId) {
                     if (isSubagentDelegationTool(node.data.name)) acc.subagents++ else acc.toolCalls++
                     acc.processAnchors.add(node.anchorSeq)
                 }
-                is ChatNode.ModelRetry, is ChatNode.Context, is ChatNode.Compaction,
+                is ChatNode.ModelRetry, is ChatNode.Compaction,
                 is ChatNode.Command, is ChatNode.Workflow, is ChatNode.UnknownSurface ->
                     acc.processAnchors.add(node.anchorSeq)
                 else -> continue
@@ -1477,9 +1484,9 @@ class SessionStore(val sessionId: SessionId) {
 
     private fun isFoldedProcessRow(node: ChatNode): Boolean {
         when (node) {
-            is ChatNode.User, is ChatNode.Steering, is ChatNode.TurnProcess,
-            is ChatNode.TurnError, is ChatNode.TurnMaxTokens, is ChatNode.TurnTail,
-            is ChatNode.SystemPrompt -> return false
+            // 触发通知说明是谁唤醒了这一轮，绝不能折进它开启的过程里。
+            is ChatNode.User, is ChatNode.Steering, is ChatNode.TurnTrigger, is ChatNode.TurnProcess,
+            is ChatNode.TurnError, is ChatNode.TurnMaxTokens, is ChatNode.TurnTail -> return false
             else -> Unit
         }
         val spec = turnProcessSpecs.values.firstOrNull { it.covers(node.anchorSeq) } ?: return false
@@ -1686,26 +1693,8 @@ private fun workflowStatusFromOutcome(outcome: String): WorkflowRunStatus = when
     else -> WorkflowRunStatus.INTERRUPTED
 }
 
-/** 上下文注入行的来源分类（与 web contextProvenance 同源）。 */
-private fun contextProvenance(source: JsonElement?): Pair<String, String?> {
-    val kind = source["kind"].str ?: return "inject" to null
-    fun collect(member: String, field: String): String? {
-        val list = source[member].arr ?: return null
-        val names = mutableListOf<String>()
-        for (entry in list) {
-            val value = entry[field].str?.takeIf { it.isNotEmpty() } ?: continue
-            if (!names.contains(value)) names.add(value)
-        }
-        return names.takeIf { it.isNotEmpty() }?.joinToString(", ")
-    }
-    return when (kind) {
-        "session-reference" -> "recall" to (collect("references", "label") ?: kind)
-        "agent-instructions" -> "inject" to (collect("changes", "path") ?: kind)
-        "skill-invocation" -> "inject" to (source["name"].str ?: kind)
-        // 未知来源按自己的 kind 标注；迁移过来的第三方插件来源写作 `plugin:<name>`。
-        else -> "inject" to kind.removePrefix("plugin:")
-    }
-}
+/** 一个收件箱目标的当前认领（web `InboxState.currentClaimed`）。 */
+private class InboxClaim(val ids: MutableSet<MessageId>, val seq: Int, val human: Boolean)
 
 /** 展开 DSH 1.5 压缩的 assistant stream 记录。 */
 private fun expandAssistantStream(stream: JsonElement?): List<Pair<Double, JsonElement>> {

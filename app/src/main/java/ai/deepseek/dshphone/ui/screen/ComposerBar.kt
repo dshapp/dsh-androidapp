@@ -860,7 +860,17 @@ private fun QueueStrip(model: PhoneModel, sessionId: SessionId, store: SessionSt
         AlertDialog(
             onDismissRequest = { editing = null },
             title = { Text(Strings.queueEdit) },
-            text = { OutlinedTextField(editDraft, { editDraft = it }) },
+            // 多行编辑：排队消息里的换行原样保留（回车就是换行，提交走按钮），对齐 Mac/web。
+            text = {
+                OutlinedTextField(
+                    editDraft,
+                    { editDraft = it },
+                    Modifier.fillMaxWidth(),
+                    singleLine = false,
+                    minLines = 3,
+                    maxLines = 10,
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     val text = editDraft

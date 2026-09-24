@@ -385,11 +385,56 @@ data class JobView(
     val kind: String = "",
     val label: String = "",
     val status: JobStatus = JobStatus.RUNNING,
+    /** 生产者实时的进度行（`3/10`、当前阶段）；结束时清掉。 */
+    val progress: String? = null,
     val detail: String? = null,
     val startedAt: Double = 0.0,
     val finishedAt: Double? = null,
+    /** 输出环的绝对坐标（0.1.7）。 */
+    val output: JobOutputRange? = null,
 ) {
     val isLive: Boolean get() = status == JobStatus.RUNNING || status == JobStatus.STOPPING
+    /** web `isObservable`：还可能有实时输出，或者已结束但留下了输出。 */
+    val isObservable: Boolean get() = isLive || (output?.total ?: 0) > 0
+    /** web `jobDetail`：运行时显示实时进度，结束后显示结束原因。 */
+    val qualifier: String? get() = progress ?: detail
+}
+
+@Serializable
+data class JobOutputRange(
+    /** 下一段输出的起始偏移（还没写过就是 0）。 */
+    val total: Long = 0,
+    /** 最早还保留着的字节；保留策略丢掉开头后大于 0。 */
+    val earliest: Long = 0,
+)
+
+/**
+ * 把已结束任务的主机原因（`exit code: 3`、`signal: SIGTERM; cancelled by the user`）
+ * 拆成退出码、信号和剩下的自由文本（对齐 Mac `JobTermination`）。
+ */
+data class JobTermination(val exitCode: Int?, val signal: String?, val remainder: String?) {
+    companion object {
+        fun parse(detail: String?): JobTermination {
+            var exitCode: Int? = null
+            var signal: String? = null
+            val rest = mutableListOf<String>()
+            for (part in (detail ?: "").split(';')) {
+                val piece = part.trim()
+                val code = if (exitCode == null && piece.startsWith("exit code:")) {
+                    piece.removePrefix("exit code:").trim().toIntOrNull()
+                } else null
+                when {
+                    code != null -> exitCode = code
+                    piece.startsWith("signal:") && signal == null -> {
+                        val value = piece.removePrefix("signal:").trim()
+                        if (value.isNotEmpty() && value != "null") signal = value
+                    }
+                    piece.isNotEmpty() -> rest.add(piece)
+                }
+            }
+            return JobTermination(exitCode, signal, rest.takeIf { it.isNotEmpty() }?.joinToString("; "))
+        }
+    }
 }
 
 // 子智能体 ————————————————————————————————————————————————————

@@ -197,13 +197,33 @@ data class WorkflowRunData(
 
 // 其它节点 ————————————————————————————————————————————————————
 
-data class SystemPromptChatNode(
+/**
+ * 唤醒这一轮的非人类消息（web `turn-trigger`）：定时任务、后台任务结束、插件、goal 续跑、
+ * webhook……单独画成一行折叠通知；其余非人类上下文一律不进聊天。
+ */
+data class TurnTriggerNode(
     val seq: Int,
     val time: Double,
-    val anchorSeq: Int,
-    val text: String,
-    val update: Boolean,
-)
+    val messageId: MessageId,
+    val content: List<ContentBlock>,
+    val source: JsonElement?,
+) {
+    /** 按 `source.kind` 分的触发类别（web `turnTriggerDetails`）；认不出的来源归 [TurnTriggerKind.REQUEST]。 */
+    val kind: TurnTriggerKind
+        get() = when (source["kind"].str) {
+            "goal" -> TurnTriggerKind.GOAL
+            "agent-message" -> TurnTriggerKind.AGENT
+            "team-message" -> TurnTriggerKind.TEAM
+            "subagent-settled" -> TurnTriggerKind.SUBAGENT
+            "webhook" -> if (source["provider"].str == "github") TurnTriggerKind.GITHUB else TurnTriggerKind.WEBHOOK
+            "schedule" -> TurnTriggerKind.SCHEDULE
+            "tool-jobs" -> TurnTriggerKind.JOB
+            "cordis-host-runner" -> TurnTriggerKind.PLUGIN
+            else -> TurnTriggerKind.REQUEST
+        }
+}
+
+enum class TurnTriggerKind { REQUEST, GOAL, AGENT, TEAM, SUBAGENT, GITHUB, WEBHOOK, SCHEDULE, JOB, PLUGIN }
 
 data class UnknownSurfaceNode(val seq: Int, val time: Double, val type: String, val data: JsonElement?)
 
@@ -272,15 +292,7 @@ data class TurnTailData(
 sealed interface ChatNode {
     data class User(val seq: Int, val time: Double, val messageId: MessageId, val content: List<ContentBlock>) : ChatNode
     data class Steering(val seq: Int, val time: Double, val messageId: MessageId, val content: List<ContentBlock>) : ChatNode
-    data class Context(
-        val seq: Int,
-        val time: Double,
-        val messageId: MessageId,
-        val content: List<ContentBlock>,
-        val source: JsonElement?,
-        val provenanceLabel: String?,
-        val provenanceRole: String,
-    ) : ChatNode
+    data class TurnTrigger(val data: TurnTriggerNode) : ChatNode
     data class Assistant(val step: AssistantStepData) : ChatNode
     data class Tool(val data: ToolChatData) : ChatNode
     data class Compaction(val data: CompactionSummaryNode) : ChatNode
@@ -291,7 +303,6 @@ sealed interface ChatNode {
     data class TurnTail(val data: TurnTailData) : ChatNode
     data class Workflow(val data: WorkflowRunData) : ChatNode
     data class TurnProcess(val spec: TurnProcessSpec) : ChatNode
-    data class SystemPrompt(val data: SystemPromptChatNode) : ChatNode
     data class UnknownSurface(val data: UnknownSurfaceNode) : ChatNode
 }
 
@@ -299,7 +310,7 @@ val ChatNode.nodeId: String
     get() = when (this) {
         is ChatNode.User -> "u-$messageId"
         is ChatNode.Steering -> "s-$messageId"
-        is ChatNode.Context -> "c-$messageId"
+        is ChatNode.TurnTrigger -> "trg-${data.messageId}"
         is ChatNode.Assistant -> "a-${step.turn}:${step.step}"
         is ChatNode.Tool -> "t-${data.callId}"
         is ChatNode.Compaction -> "cmp-${data.compactionId}"
@@ -310,7 +321,6 @@ val ChatNode.nodeId: String
         is ChatNode.TurnTail -> "ttl-${data.turn}"
         is ChatNode.Workflow -> "wf-${data.runId}"
         is ChatNode.TurnProcess -> "tp-${spec.turn}"
-        is ChatNode.SystemPrompt -> "sys-${data.seq}"
         is ChatNode.UnknownSurface -> "unk-${data.seq}"
     }
 
@@ -319,7 +329,7 @@ val ChatNode.anchorSeq: Double
     get() = when (this) {
         is ChatNode.User -> seq.toDouble()
         is ChatNode.Steering -> seq.toDouble()
-        is ChatNode.Context -> seq.toDouble()
+        is ChatNode.TurnTrigger -> data.seq.toDouble()
         is ChatNode.Assistant -> step.settledSeq?.toDouble() ?: step.firstVisibleSeq ?: step.startSeq
         is ChatNode.Tool -> data.startSeq.toDouble()
         is ChatNode.Compaction -> data.seq.toDouble()
@@ -330,7 +340,6 @@ val ChatNode.anchorSeq: Double
         is ChatNode.TurnTail -> data.seq.toDouble() + 0.1
         is ChatNode.Workflow -> data.anchorSeq.toDouble()
         is ChatNode.TurnProcess -> spec.processStartSeq - 0.001
-        is ChatNode.SystemPrompt -> data.anchorSeq.toDouble()
         is ChatNode.UnknownSurface -> data.seq.toDouble()
     }
 
@@ -368,7 +377,7 @@ val ChatNode.turnNumber: Int?
 fun chatNodeSearchText(node: ChatNode): String = when (node) {
     is ChatNode.User -> plainText(node.content)
     is ChatNode.Steering -> plainText(node.content)
-    is ChatNode.Context -> plainText(node.content)
+    is ChatNode.TurnTrigger -> plainText(node.data.content)
     is ChatNode.Assistant -> node.step.blocks.mapNotNull { block ->
         when (block) {
             is AssistantBlock.Text -> block.text

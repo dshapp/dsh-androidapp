@@ -3,6 +3,9 @@ package ai.deepseek.dshphone.state
 import ai.deepseek.dshphone.model.*
 import ai.deepseek.dshphone.net.*
 import android.util.Log
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -66,6 +69,8 @@ class StreamCoordinator(
         fun sessionIdOfFollow(streamId: String): SessionId? =
             if (streamId.startsWith("follow:")) streamId.removePrefix("follow:") else null
         fun jobsStreamId(sessionId: SessionId) = "jobs:$sessionId"
+        /** 唯一的一条 `job/follow` 观察流（同一时刻只看一个任务的输出，同 web/Mac）。 */
+        const val JOB_OUTPUT = "job-output"
         fun sessionIdOfJobs(streamId: String): SessionId? =
             if (streamId.startsWith("jobs:")) streamId.removePrefix("jobs:") else null
     }
@@ -95,6 +100,36 @@ class StreamCoordinator(
     private val assistantExpectations = mutableMapOf<SessionId, Pair<String, Int>>()
 
     var onConnectionState: ((WsConnectionState) -> Unit)? = null
+
+    /** 正在观察输出的那一个后台任务（`job/follow`）；观察跟着那一个可见的输出面板走。 */
+    var observedJob by mutableStateOf<ObservedJobOutput?>(null)
+        private set
+
+    /** 为一个任务打开 `job/follow`，替换掉别的观察；对已在观察的同一任务幂等。 */
+    fun observeJob(sessionId: SessionId, jobId: String) {
+        val current = observedJob
+        if (current?.sessionId == sessionId && current.jobId == jobId) return
+        stopObservingJob()
+        observedJob = ObservedJobOutput(sessionId, jobId)
+        mux?.subscribe(
+            JOB_OUTPUT,
+            "job/follow",
+            buildJsonObject {
+                put("request", buildJsonObject {
+                    put("sessionId", sessionId)
+                    put("jobId", jobId)
+                })
+            },
+        )
+    }
+
+    /** 关掉 [observeJob] 打开的观察；给了 [jobId] 时只在它正是这一条时才关。 */
+    fun stopObservingJob(jobId: String? = null) {
+        val current = observedJob ?: return
+        if (jobId != null && current.jobId != jobId) return
+        observedJob = null
+        mux?.unsubscribe(JOB_OUTPUT)
+    }
 
     fun start() {
         if (mux != null) return
@@ -145,7 +180,7 @@ class StreamCoordinator(
             buildJsonObject {
                 put("request", buildJsonObject {
                     put("address", addressJson)
-                    put("maxMessages", maxMessages)
+                    putHistoryWindow(maxMessages)
                     put("assistantStream", true)
                 })
             },
@@ -170,6 +205,7 @@ class StreamCoordinator(
         assistantExpectations.remove(sessionId)
         mux?.unsubscribe(followStreamId(sessionId))
         mux?.unsubscribe(jobsStreamId(sessionId))
+        if (observedJob?.sessionId == sessionId) stopObservingJob()
     }
 
     private fun foldSocketState(state: WsConnectionState) {
@@ -200,9 +236,12 @@ class StreamCoordinator(
             is MuxEvent.Item -> handleItem(event.streamId, event.value)
             is MuxEvent.Failure -> {
                 Log.w(TAG, "stream ${event.streamId} failed: ${event.error.message}")
+                if (event.streamId == JOB_OUTPUT) {
+                    observedJob = observedJob?.copy(streaming = false, error = event.error.message)
+                }
                 sessionIdOfFollow(event.streamId)?.let { failFollow(it, event.error) }
             }
-            is MuxEvent.End -> Unit
+            is MuxEvent.End -> if (event.streamId == JOB_OUTPUT) observedJob = observedJob?.copy(streaming = false)
         }
     }
 
@@ -218,6 +257,7 @@ class StreamCoordinator(
             EVENTS -> handleRemoteEvent(decodeRemoteEventFrame(value))
             WORKSPACES -> handleWorkspace(decodeWorkspaceFrame(value))
             CONTROL -> handleControl(decodeControlFrame(value))
+            JOB_OUTPUT -> observedJob = observedJob?.folding(decodeJobFollowFrame(value))
             else -> {
                 sessionIdOfJobs(streamId)?.let { sessionId ->
                     if (removedSessionIds.contains(sessionId)) return

@@ -475,27 +475,7 @@ fun SessionPanelSheet(
                 }
             }
 
-            store?.jobs?.takeIf { it.isNotEmpty() }?.let { jobs ->
-                SectionTitle(Strings.jobs)
-                jobs.forEach { job ->
-                    ListItem(
-                        headlineContent = { Text(job.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        supportingContent = job.detail?.let { { Text(it, maxLines = 1) } },
-                        trailingContent = {
-                            Row(verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                if (job.isLive) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                                Text(job.status.wire, style = MaterialTheme.typography.labelSmall)
-                                if (job.status == JobStatus.RUNNING) {
-                                    IconButton(onClick = { model.killJob(sessionId, job.id) }) {
-                                        Icon(Icons.Default.Stop, Strings.stop)
-                                    }
-                                }
-                            }
-                        },
-                    )
-                }
-            }
+            store?.jobs?.takeIf { it.isNotEmpty() }?.let { jobs -> JobsSection(model, sessionId, jobs) }
 
             if (subagents.isNotEmpty()) {
                 SectionTitle(Strings.subagents)
@@ -940,4 +920,283 @@ fun FilePreviewSheet(model: PhoneModel, sessionId: SessionId, path: String, onDi
             }
         }
     }
+}
+
+// —— 后台任务 ————————————————————————————————————————————————
+
+/**
+ * 会话面板里的后台任务：分「进行中 / 已结束」两段（web 任务弹层）。
+ *
+ * 进行中按开始时间排，已结束按结束时间倒序；已结束一段可以折叠（默认只在没有进行中的
+ * 任务时展开），也可以「清空」——只是本机隐藏，主机的记录不动。点一行打开详情。
+ */
+@Composable
+private fun JobsSection(model: PhoneModel, sessionId: SessionId, jobs: List<JobView>) {
+    var settledOpen by remember(sessionId) { mutableStateOf<Boolean?>(null) }
+    var detailJobId by remember(sessionId) { mutableStateOf<String?>(null) }
+    val cleared = model.clearedJobs(sessionId)
+    val live = jobs.filter { it.isLive }.sortedBy { it.startedAt }
+    val settled = jobs.filter { !it.isLive && !cleared.contains(it.id) }
+        .sortedByDescending { it.finishedAt ?: it.startedAt }
+    if (live.isEmpty() && settled.isEmpty()) return
+    val settledExpanded = settledOpen ?: live.isEmpty()
+
+    SectionTitle(Strings.jobs)
+    if (live.isNotEmpty()) {
+        JobGroupHeader(Strings.jobsSectionLive)
+        live.forEach { JobRow(model, sessionId, it) { detailJobId = it.id } }
+    }
+    if (settled.isNotEmpty()) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable { settledOpen = !settledExpanded }
+                .padding(start = 16.dp, end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                if (settledExpanded) Icons.Default.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                null,
+                Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                fmt(Strings.jobsSectionSettled, settled.size),
+                Modifier.weight(1f).padding(start = 4.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            TextButton(onClick = { model.clearSettledJobs(sessionId, settled.map { it.id }) }) {
+                Text(Strings.jobsSectionClear)
+            }
+        }
+        if (settledExpanded) settled.forEach { JobRow(model, sessionId, it) { detailJobId = it.id } }
+    }
+
+    detailJobId?.let { id ->
+        val job = jobs.firstOrNull { it.id == id }
+        if (job == null) {
+            detailJobId = null
+        } else {
+            JobDetailDialog(model, sessionId, job) { detailJobId = null }
+        }
+    }
+}
+
+@Composable
+private fun JobGroupHeader(text: String) {
+    Text(
+        text,
+        Modifier.padding(start = 16.dp, top = 4.dp, bottom = 2.dp),
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+@Composable
+private fun JobRow(model: PhoneModel, sessionId: SessionId, job: JobView, onOpen: () -> Unit) {
+    ListItem(
+        modifier = Modifier.clickable(onClick = onOpen),
+        headlineContent = { Text(job.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        supportingContent = job.qualifier?.let { { Text(it, maxLines = 1, overflow = TextOverflow.Ellipsis) } },
+        trailingContent = {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (job.isLive) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                Text(
+                    jobStatusLabel(job.status),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = jobStatusColor(job.status),
+                )
+                if (job.status == JobStatus.RUNNING) JobStopButton(model, sessionId, job, compact = true)
+            }
+        },
+    )
+}
+
+/** 停止按钮：先弹原生确认框，确认后 `job/kill`；受理后一直转圈，直到 job/list 帧把它移出 running。 */
+@Composable
+private fun JobStopButton(model: PhoneModel, sessionId: SessionId, job: JobView, compact: Boolean) {
+    val scope = rememberCoroutineScope()
+    var confirming by remember(job.id) { mutableStateOf(false) }
+    var pending by remember(job.id) { mutableStateOf(false) }
+    var failed by remember(job.id) { mutableStateOf(false) }
+    if (pending) {
+        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+    } else if (compact) {
+        IconButton(onClick = { confirming = true }) {
+            Icon(
+                Icons.Default.Stop,
+                fmt(Strings.jobsKillStop, job.label),
+                tint = if (failed) MaterialTheme.colorScheme.error else LocalContentColor.current,
+            )
+        }
+    } else {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(onClick = { confirming = true }) {
+                Icon(Icons.Default.Stop, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text(Strings.jobsStopAction)
+            }
+            if (failed) {
+                Text(
+                    Strings.jobsKillFailed,
+                    Modifier.padding(start = 8.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+    }
+    if (confirming) {
+        AlertDialog(
+            onDismissRequest = { confirming = false },
+            title = { Text(fmt(Strings.jobsStopDialogTitle, job.label)) },
+            text = { Text(Strings.jobsStopDialogMessage) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirming = false
+                    pending = true
+                    failed = false
+                    scope.launch {
+                        if (!model.killJob(sessionId, job.id)) {
+                            pending = false
+                            failed = true
+                        }
+                    }
+                }) { Text(Strings.jobsStopAction, color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirming = false }) { Text(Strings.cancel) } },
+        )
+    }
+}
+
+/** 任务详情：字段（状态、开始/结束时刻、耗时、退出码、信号、详情），再加实时输出面板。 */
+@Composable
+private fun JobDetailDialog(model: PhoneModel, sessionId: SessionId, job: JobView, onDismiss: () -> Unit) {
+    CardDetailDialog(Icons.Default.Schedule, job.label, job.label, onDismiss) {
+        // 运行中的耗时需要一个时钟；已结束的冻结在 finishedAt，不必再走。
+        var now by remember { mutableStateOf(System.currentTimeMillis().toDouble()) }
+        if (job.isLive) {
+            LaunchedEffect(job.id) {
+                while (true) {
+                    now = System.currentTimeMillis().toDouble()
+                    kotlinx.coroutines.delay(1000)
+                }
+            }
+        }
+        val end = if (job.isLive) now else job.finishedAt ?: job.startedAt
+        val termination = JobTermination.parse(if (job.progress == null) job.detail else null)
+        val remainder = job.progress ?: termination.remainder
+
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (job.isLive) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+            Text(jobStatusLabel(job.status), color = jobStatusColor(job.status),
+                style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.weight(1f))
+            if (job.status == JobStatus.RUNNING) JobStopButton(model, sessionId, job, compact = false)
+        }
+        Spacer(Modifier.height(8.dp))
+        JobField(Strings.jobsDetailId, job.id, mono = true)
+        if (job.kind.isNotEmpty()) JobField(Strings.jobsDetailKind, job.kind)
+        JobField(Strings.jobsDetailStarted, clockTime(job.startedAt))
+        job.finishedAt?.let { JobField(Strings.jobsDetailFinished, clockTime(it)) }
+        JobField(Strings.jobsDetailDuration, formatDuration(maxOf(0.0, end - job.startedAt)))
+        termination.exitCode?.let { code ->
+            JobField(
+                Strings.jobsDetailExitCode, code.toString(), mono = true,
+                color = if (code == 0) null else MaterialTheme.colorScheme.error,
+            )
+        }
+        termination.signal?.let { JobField(Strings.jobsDetailSignal, it, mono = true) }
+        JobField(Strings.jobsDetailDetail, remainder ?: Strings.jobsDetailUnavailable, muted = remainder == null)
+
+        // web `isObservable`：进行中的任务，以及结束后还留着输出的任务。
+        if (job.isObservable) {
+            Spacer(Modifier.height(12.dp))
+            JobOutputPanel(model, sessionId, job)
+        }
+    }
+}
+
+@Composable
+private fun JobField(label: String, value: String, mono: Boolean = false, muted: Boolean = false, color: Color? = null) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        androidx.compose.foundation.text.selection.SelectionContainer(Modifier.weight(1f)) {
+            Text(
+                value,
+                Modifier.fillMaxWidth(),
+                style = MaterialTheme.typography.bodyMedium,
+                fontFamily = if (mono) androidx.compose.ui.text.font.FontFamily.Monospace else null,
+                color = color ?: if (muted) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+                textAlign = androidx.compose.ui.text.style.TextAlign.End,
+            )
+        }
+    }
+}
+
+/**
+ * 任务的实时输出（`job/follow`），对应 web 内嵌的终端面板：等宽、可选中、跟着尾部走，
+ * 带「较早输出已丢弃」和「实时流中断」两条提示。面板在屏时打开观察，离屏时关掉。
+ */
+@Composable
+private fun JobOutputPanel(model: PhoneModel, sessionId: SessionId, job: JobView) {
+    DisposableEffect(sessionId, job.id) {
+        model.observeJob(sessionId, job.id)
+        onDispose { model.stopObservingJob(job.id) }
+    }
+    val observed = model.observedJob?.takeIf { it.sessionId == sessionId && it.jobId == job.id }
+    val streaming = observed?.streaming ?: true
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(Strings.jobsOutputTitle, style = MaterialTheme.typography.titleSmall)
+        if (streaming) CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 2.dp)
+    }
+    if (observed?.gapBefore == true) {
+        Text(Strings.jobsOutputGap, style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    observed?.error?.let {
+        Text(fmt(Strings.jobsOutputError, it), style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.error)
+    }
+    val text = when {
+        observed == null -> ""
+        observed.text.isEmpty() && !observed.streaming -> Strings.jobsOutputNone
+        else -> observed.text
+    }
+    val scroll = rememberScrollState()
+    // 跟着尾部：有新输出时滚到底。
+    LaunchedEffect(text.length) { scroll.scrollTo(scroll.maxValue) }
+    Box(
+        Modifier
+            .padding(top = 6.dp)
+            .fillMaxWidth()
+            .heightIn(min = 120.dp, max = 360.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .verticalScroll(scroll)
+            .padding(8.dp),
+    ) {
+        MonospaceBlock(
+            text,
+            tint = if (observed?.text.isNullOrEmpty()) MaterialTheme.colorScheme.onSurfaceVariant
+            else MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+private fun jobStatusLabel(status: JobStatus): String = when (status) {
+    JobStatus.RUNNING -> Strings.jobStatusRunning
+    JobStatus.STOPPING -> Strings.jobStatusStopping
+    JobStatus.COMPLETED -> Strings.jobStatusCompleted
+    JobStatus.KILLED -> Strings.jobStatusKilled
+    JobStatus.FAILED -> Strings.jobStatusFailed
+}
+
+@Composable
+private fun jobStatusColor(status: JobStatus): Color = when (status) {
+    JobStatus.RUNNING -> MaterialTheme.colorScheme.primary
+    JobStatus.FAILED -> MaterialTheme.colorScheme.error
+    JobStatus.STOPPING, JobStatus.KILLED -> MaterialTheme.colorScheme.tertiary
+    JobStatus.COMPLETED -> MaterialTheme.colorScheme.onSurfaceVariant
 }

@@ -400,6 +400,16 @@ fun SessionListScreen(
                             }
                             // 拖动分组时整张列表先收成一排分组行：手指只在几行之间移动就能换位，
                             // 不必跨过一整组会话；松手复原。
+                            // 折叠的分组仍然列出正在运行的会话（对齐 web/Mac 侧栏）：
+                            // 折起来是为了收起闲置的会话，不能把正在干活的也藏掉。
+                            if (!groupDrag.dragging && collapsed.contains(group.id)) {
+                                items(group.sessions.filter { it.running }, key = { it.sessionId }) { summary ->
+                                    SessionRow(
+                                        model, summary, onOpenSession,
+                                        onRename = { renameText = titleOf(model, summary); renaming = summary },
+                                    )
+                                }
+                            }
                             if (!groupDrag.dragging && !collapsed.contains(group.id)) {
                                 val limit = PAGE_SIZE * (pages[group.id] ?: 1)
                                 val shown = group.sessions.take(limit)

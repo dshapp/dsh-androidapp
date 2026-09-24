@@ -66,7 +66,7 @@ fun MessageRow(
     when (node) {
         is ChatNode.User -> UserBubble(node.content, sessionId, model, onOpenSession, findQuery, findActive)
         is ChatNode.Steering -> UserBubble(node.content, sessionId, model, onOpenSession, findQuery, findActive)
-        is ChatNode.Context -> ContextRow(node)
+        is ChatNode.TurnTrigger -> TurnTriggerRow(node.data)
         is ChatNode.Assistant ->
             AssistantRow(node.step, sessionId, model, store, onOpenFile, onOpenLink, findQuery, findActive)
         is ChatNode.Tool -> ToolCard(node.data, cwd, findQuery, findActive, sessionId, model)
@@ -80,7 +80,6 @@ fun MessageRow(
         // 收尾消息还没落定的轮次没有页脚（对齐 Mac 的 `TurnTailRow`）。
         is ChatNode.TurnTail -> if (node.rendersRow) TurnTailRow(node.data, onFork, model, store)
         is ChatNode.TurnProcess -> TurnProcessRow(node.spec, store)
-        is ChatNode.SystemPrompt -> SystemPromptRow(node.data)
         is ChatNode.Workflow -> WorkflowRunCard(node.data)
         is ChatNode.UnknownSurface -> UnknownSurfaceRow(node.data)
     }
@@ -318,6 +317,12 @@ private fun AssistantRow(
                         onOpenLink = onOpenLink,
                         findQuery = findQuery,
                         findActive = findActive,
+                        loadImage = remember(sessionId, model) {
+                            val loader: suspend (FileLinkTarget) -> android.graphics.Bitmap? = { target ->
+                                model.workspaceImage(target.sessionId ?: sessionId, target.path)
+                            }
+                            loader
+                        },
                     )
                 }
                 is AssistantBlock.Reasoning -> ThinkCard(block.text, findQuery, findActive)
@@ -331,40 +336,52 @@ private fun AssistantRow(
     }
 }
 
+/** 轮次触发通知：谁唤醒了这一轮（定时任务、后台任务、插件……），正文在详情里看。 */
 @Composable
-private fun ContextRow(node: ChatNode.Context) {
+private fun TurnTriggerRow(data: TurnTriggerNode) {
     var detail by remember { mutableStateOf(false) }
-    // notice 自带一句人能读的 summary，优先于来源名（对齐 iOS PhoneContextRow：
-    // collapsedSummary ?? provenanceLabel ?? contextInjected）；其余 form 没有这一行。
-    val summary = contextCollapsedSummary(node.source)
-        ?: node.provenanceLabel
-        ?: Strings.contextInjected
-    val icon = when (ContextForm.from(node.source)) {
-        ContextForm.INSTRUCTIONS -> Icons.AutoMirrored.Filled.List
-        ContextForm.CATALOG -> Icons.AutoMirrored.Filled.MenuBook
-        ContextForm.SNAPSHOT -> Icons.Default.CameraAlt
-        ContextForm.NOTICE -> Icons.Default.Notifications
-        ContextForm.RELAY -> Icons.AutoMirrored.Filled.TrendingFlat
-        ContextForm.RECALL -> Icons.Default.History
-        null -> if (node.provenanceRole == "recall") Icons.Default.History else Icons.AutoMirrored.Filled.NoteAdd
-    }
-    CardRow(icon, summary, onClick = { detail = true })
+    val title = turnTriggerTitle(data.kind)
+    val icon = turnTriggerIcon(data.kind)
+    CardRow(icon, title, onClick = { detail = true })
     if (detail) {
-        val text = plainText(node.content)
-        CardDetailDialog(icon, summary, text, { detail = false }) { SelectionText(text) }
+        val text = plainText(data.content)
+        CardDetailDialog(icon, title, text, { detail = false }) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    Strings.turnTriggerExplanation,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                SelectionText(text)
+            }
+        }
     }
 }
 
-@Composable
-private fun SystemPromptRow(data: SystemPromptChatNode) {
-    var detail by remember { mutableStateOf(false) }
-    val title = if (data.update) Strings.systemPromptUpdated else Strings.systemPrompt
-    CardRow(Icons.AutoMirrored.Filled.Notes, title, onClick = { detail = true })
-    if (detail) {
-        CardDetailDialog(Icons.AutoMirrored.Filled.Notes, title, data.text, { detail = false }) {
-            SelectionText(data.text, mono = true)
-        }
-    }
+private fun turnTriggerTitle(kind: TurnTriggerKind): String = when (kind) {
+    TurnTriggerKind.REQUEST -> Strings.turnTriggerRequest
+    TurnTriggerKind.GOAL -> Strings.turnTriggerGoal
+    TurnTriggerKind.AGENT -> Strings.turnTriggerAgent
+    TurnTriggerKind.TEAM -> Strings.turnTriggerTeam
+    TurnTriggerKind.SUBAGENT -> Strings.turnTriggerSubagent
+    TurnTriggerKind.GITHUB -> Strings.turnTriggerGitHub
+    TurnTriggerKind.WEBHOOK -> Strings.turnTriggerWebhook
+    TurnTriggerKind.SCHEDULE -> Strings.turnTriggerSchedule
+    TurnTriggerKind.JOB -> Strings.turnTriggerJob
+    TurnTriggerKind.PLUGIN -> Strings.turnTriggerPlugin
+}
+
+private fun turnTriggerIcon(kind: TurnTriggerKind): ImageVector = when (kind) {
+    TurnTriggerKind.REQUEST -> Icons.AutoMirrored.Filled.NoteAdd
+    TurnTriggerKind.GOAL -> Icons.Default.Flag
+    TurnTriggerKind.AGENT -> Icons.AutoMirrored.Filled.Send
+    TurnTriggerKind.TEAM -> Icons.Default.Groups
+    TurnTriggerKind.SUBAGENT -> Icons.Default.HowToReg
+    TurnTriggerKind.GITHUB -> Icons.AutoMirrored.Filled.CallSplit
+    TurnTriggerKind.WEBHOOK -> Icons.Default.Public
+    TurnTriggerKind.SCHEDULE -> Icons.Default.Alarm
+    TurnTriggerKind.JOB -> Icons.AutoMirrored.Filled.List
+    TurnTriggerKind.PLUGIN -> Icons.Default.Extension
 }
 
 @Composable

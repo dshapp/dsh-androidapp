@@ -1062,10 +1062,40 @@ class PhoneModel private constructor(app: Application) {
     }
 
     /** 停止一个后台任务；结果由 `job/list` 流带回来，这里不改本地状态。 */
-    fun killJob(sessionId: SessionId, jobId: String) {
-        scope.launch {
-            try { api?.jobKill(sessionId, jobId) } catch (e: Exception) { lastErrorMessage = describe(e) }
+    /**
+     * 请求停止一个后台任务（`job/kill`）。主机受理后就返回（已经结束的也算）；
+     * 行从列表里消失前界面保持忙碌态，由 job/list 帧把它移出 running。
+     *
+     * @return 主机是否受理；失败时同时把原因放进 [lastErrorMessage]。
+     */
+    suspend fun killJob(sessionId: SessionId, jobId: String): Boolean {
+        val client = api ?: return false
+        return try {
+            client.jobKill(sessionId, jobId)
+            true
+        } catch (e: Exception) {
+            lastErrorMessage = describe(e)
+            false
         }
+    }
+
+    /** 当前在观察输出的后台任务（`job/follow`），同一时刻只有一个。 */
+    val observedJob: ObservedJobOutput? get() = coordinator?.observedJob
+
+    fun observeJob(sessionId: SessionId, jobId: String) { coordinator?.observeJob(sessionId, jobId) }
+
+    fun stopObservingJob(jobId: String) { coordinator?.stopObservingJob(jobId) }
+
+    /**
+     * 每个会话里用户「清空」掉的已结束任务 id（web `clearedKeys`）：只是本机隐藏，
+     * 主机那边的记录不动。
+     */
+    private val clearedJobIds = mutableStateMapOf<SessionId, Set<String>>()
+
+    fun clearedJobs(sessionId: SessionId): Set<String> = clearedJobIds[sessionId] ?: emptySet()
+
+    fun clearSettledJobs(sessionId: SessionId, jobIds: Collection<String>) {
+        clearedJobIds[sessionId] = clearedJobs(sessionId) + jobIds
     }
 
     // —— 子智能体 ——————————————————————————————————————————————
@@ -1355,6 +1385,62 @@ class PhoneModel private constructor(app: Application) {
         }
     }
 
+    /** 正文里本地路径图片的解码结果，按「会话|路径」缓存；只留最近的几张。 */
+    private val workspaceImageCache = object : LinkedHashMap<String, Bitmap>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Bitmap>?): Boolean =
+            size > WORKSPACE_IMAGE_CACHE_ENTRIES
+    }
+    /** 读过但失败的「会话|路径」：同一屏重组时不必反复向主机要一张打不开的图。 */
+    private val workspaceImageFailures = mutableSetOf<String>()
+
+    /**
+     * 助手正文里 `![](/abs/shot.png)` 这类本地路径图片的位图（对齐 Web `localPathMediaUrl`
+     * 把本地路径改走主机取图）。
+     *
+     * Web/Mac 走的是主机的 `GET /api/file?path=…`；手机经隧道只放行 `/api/<ns>/<method>`
+     * 的 POST，所以这里改用同一条会话作用域的 `workspaceFiles/readBytes` 分片读到缓存文件，
+     * 再按显示宽度降采样解码，峰值内存只有一片加一张缩过的图。超过
+     * [WORKSPACE_IMAGE_MAX_BYTES] 的不内联显示（点开仍交给系统查看器）。
+     *
+     * @return 解码好的位图；读不到、太大或不是能解的图片时为 null。
+     */
+    suspend fun workspaceImage(sessionId: SessionId, path: String): Bitmap? {
+        val key = "$sessionId|$path"
+        synchronized(workspaceImageCache) { workspaceImageCache[key] }?.let { return it }
+        if (synchronized(workspaceImageFailures) { key in workspaceImageFailures }) return null
+        if (api == null) return null
+        val staged = File(appContext.cacheDir, "inline-images").apply { mkdirs() }
+            .let { File.createTempFile("img", ".bin", it) }
+        val bitmap = try {
+            workspaceFileBytes(sessionId, path, staged, WORKSPACE_IMAGE_MAX_BYTES)
+            withContext(Dispatchers.IO) { decodeSampled(staged, WORKSPACE_IMAGE_MAX_EDGE) }
+        } catch (e: CancellationException) {
+            staged.delete()
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "inline image $path unavailable: ${e.message}")
+            null
+        } finally {
+            staged.delete()
+        }
+        if (bitmap == null) {
+            synchronized(workspaceImageFailures) { workspaceImageFailures.add(key) }
+        } else {
+            synchronized(workspaceImageCache) { workspaceImageCache[key] = bitmap }
+        }
+        return bitmap
+    }
+
+    /** 先只读尺寸，再按 2 的幂降采样到长边不超过 [maxEdge]。 */
+    private fun decodeSampled(file: File, maxEdge: Int): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.path, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= maxEdge) sample *= 2
+        return BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inSampleSize = sample })
+    }
+
     suspend fun attachmentImage(sessionId: SessionId, ref: ImageAttachmentRef): Bitmap? {
         imageCache[ref.attachmentId]?.let { return it }
         val client = api ?: return null
@@ -1385,6 +1471,12 @@ class PhoneModel private constructor(app: Application) {
 
     companion object {
         private const val TAG = "PhoneModel"
+
+        /** 正文内联图片的字节上限：再大就只给链接，点开交给系统查看器。 */
+        private const val WORKSPACE_IMAGE_MAX_BYTES = 16L * 1024 * 1024
+        /** 内联图片解码后的长边上限（像素），手机列宽用不着更大。 */
+        private const val WORKSPACE_IMAGE_MAX_EDGE = 2048
+        private const val WORKSPACE_IMAGE_CACHE_ENTRIES = 24
 
         /** 上一次真正开出新会话时用的工作区（新建会话页的默认选中项）。 */
         private const val LAST_WORKSPACE_KEY = "phone.workspace.lastNewSession"

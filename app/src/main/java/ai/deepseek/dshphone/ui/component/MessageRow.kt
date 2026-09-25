@@ -463,8 +463,12 @@ private fun TurnTailRow(
     var timeOpen by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     Column(Modifier.fillMaxWidth()) {
-        // 本轮的改动文件与产出文件一起挂在回合尾部（web 把三者合并进 turnTail 链）。
-        store?.let { ChangedFilesCard(model, it, data.turn) }
+        // 本轮的改动文件与交付文件一起挂在回合尾部，顺序同 web `Deliverables.tsx`：
+        // 改动卡片在前、`present` 交付卡片在后。
+        store?.let {
+            ChangedFilesCard(model, it, data.turn)
+            PresentedFilesRow(model, it, data.turn)
+        }
         Row(
             Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,

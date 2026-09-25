@@ -26,8 +26,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
-/** 展开前显示的文件行数（对齐 web CHANGED_FILES_SHOWN 与 Mac 的 shownLimit）。 */
-private const val CHANGED_FILES_SHOWN = 3
+/** 展开前显示的文件行数（对齐 web `COLLAPSED_ROWS` 与 Mac 的 `shownLimit`）。 */
+private const val COLLAPSED_ROWS = 4
 
 private val AddedTint = Color(0xFF2E7D32)
 private val DeletedTint = Color(0xFFC62828)
@@ -89,11 +89,11 @@ private fun ChangedFilesCardBody(model: PhoneModel, address: TurnChangesAddress)
                 color = DeletedTint,
             )
         }
-        val rows = if (expanded) summary.files else summary.files.take(CHANGED_FILES_SHOWN)
+        val rows = if (expanded) summary.files else summary.files.take(COLLAPSED_ROWS)
         rows.forEach { file ->
             ChangedFileRow(file) { reviewing = file }
         }
-        if (summary.files.size > CHANGED_FILES_SHOWN) {
+        if (summary.files.size > COLLAPSED_ROWS) {
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -109,7 +109,7 @@ private fun ChangedFilesCardBody(model: PhoneModel, address: TurnChangesAddress)
                 )
                 Text(
                     if (expanded) Strings.changedFilesCollapse
-                    else fmt(Strings.changedFilesShowAll, summary.files.size - CHANGED_FILES_SHOWN),
+                    else fmt(Strings.changedFilesShowAll, summary.files.size),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -189,8 +189,8 @@ private fun ChangedFileDiffDialog(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.Center,
                 ) { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) }
-                diff is ChangedFileDiff.Binary -> Text(Strings.changedFilesBinary)
-                diff is ChangedFileDiff.Oversized -> Text(Strings.changedFilesOversized)
+                diff is ChangedFileDiff.Binary -> Text(Strings.changedDiffBinary)
+                diff is ChangedFileDiff.Oversized -> Text(Strings.changedDiffOversized)
                 diff is ChangedFileDiff.Text -> DiffBody(diff, file)
             }
         },
@@ -208,13 +208,13 @@ private fun DiffBody(diff: ChangedFileDiff.Text, file: ChangedFileEntry) {
     ) {
         if (diff.coarse) {
             Text(
-                Strings.changedFilesCoarse,
+                Strings.changedDiffCoarse,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.error,
             )
         }
         if (diff.hunks.isEmpty()) {
-            Text(Strings.changedFilesNoLines, style = MaterialTheme.typography.bodySmall)
+            Text(Strings.changedDiffUnchanged, style = MaterialTheme.typography.bodySmall)
         }
         diff.hunks.forEach { hunk ->
             Text(
@@ -237,6 +237,6 @@ private fun DiffBody(diff: ChangedFileDiff.Text, file: ChangedFileEntry) {
                 )
             }
         }
-        if (file.oversized) Text(Strings.changedFilesOversized, style = MaterialTheme.typography.labelSmall)
+        if (file.oversized) Text(Strings.changedDiffOversized, style = MaterialTheme.typography.labelSmall)
     }
 }

@@ -287,8 +287,6 @@ class SessionStore(val sessionId: SessionId) {
 
     fun projectionValue(key: String): JsonElement? = projections[key]?.first
 
-    fun producedPaths(turn: Int): List<String> = producedPathsByTurn[turn] ?: emptyList()
-
     fun presentedFiles(turn: Int): List<PresentedFile> = presentedByTurn[turn] ?: emptyList()
 
     /** 收尾步骤才带上文件提及词表。 */

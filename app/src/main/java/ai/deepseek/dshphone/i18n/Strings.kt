@@ -219,14 +219,21 @@ object Strings {
     /** 同上动作的无障碍标签，%s 是被操作那一行的标题（对齐 Mac 的 unarchiveSessionNamed）。 */
     val unarchiveSessionNamed: String get() = pick("Unarchive %s", "取消归档 %s")
     // 改动文件卡片（0.1.6 ui-deliverables）：内容与主机 workspace-changes 插件一一对应。
-    val changedFilesTitle: String get() = pick("%d files changed", "本轮改动 %d 个文件")
-    val changedFilesShowAll: String get() = pick("Show all %d", "展开全部 %d 个")
+    // 卡片行用上游 `changes.*`、diff 正文用 `diff.*`，两套文案上游是分开的。
+    val changedFilesTitle: String get() = pick("Edited %d files", "已编辑 %d 个文件")
+    val changedFilesShowAll: String get() = pick("All %d files", "全部 %d 个文件")
     val changedFilesCollapse: String get() = pick("Collapse", "收起")
-    val changedFilesBinary: String get() = pick("Binary", "二进制")
-    val changedFilesOversized: String get() = pick("Too large to compare", "文件过大，无法比较")
-    val changedFilesNoLines: String get() = pick("No changes", "内容没有变化")
-    val changedFilesCoarse: String get() = pick("Comparison timed out; every line is shown as replaced", "比较超时，已按整文件替换显示")
-    val changedFilesUnavailable: String get() = pick("Couldn’t load this file’s changes", "无法读取该文件的改动")
+    val changedFilesBinary: String get() = pick("binary", "二进制")
+    val changedFilesOversized: String get() = pick("too large", "过大")
+    val changedDiffBinary: String get() = pick("Binary file; changes cannot be shown", "二进制文件，无法显示改动")
+    val changedDiffOversized: String get() = pick("File too large; changes cannot be shown", "文件过大，无法显示改动")
+    val changedDiffUnchanged: String get() = pick("Both sides hold the same lines", "两侧内容相同")
+    val changedDiffCoarse: String get() =
+        pick("Line comparison timed out; shown as a whole-file replacement", "逐行对比超时，按整个文件替换显示")
+    // present 交付卡片（上游 `presented.*`）。折叠上限与改动卡片同为 4。
+    val presentedAll: String get() = pick("All %d files", "全部 %d 个文件")
+    val presentedCollapse: String get() = pick("Collapse", "收起")
+    val presentedFileKind: String get() = pick("File", "文件")
     val reconnecting: String get() = pick("Reconnecting…", "重连中…")
     val sessionGone: String get() = pick("This session is no longer on the host.", "该会话已在主机上消失。")
     val pairingExpired: String get() = pick("Pairing expired — scan the QR code again.", "配对已失效，请重新扫描二维码。")

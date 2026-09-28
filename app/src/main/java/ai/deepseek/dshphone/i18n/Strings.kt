@@ -356,9 +356,6 @@ object Strings {
     /** 与 iOS approvalEscalation 同口径：工具 %s 请求越权执行。 */
     val approvalEscalation: String get() = pick("Tool %s requests privileged execution", "工具 %s 请求越权执行")
     val searchNoResults: String get() = pick("No matching sessions", "没有匹配的会话")
-    /** 内容搜索被主机关闭时与本地名称匹配结果一起展示（对齐 web search.unavailable）。 */
-    val searchUnavailable: String get() =
-        pick("Content search is unavailable. Showing name matches.", "内容搜索暂不可用，仅显示名称匹配。")
     /** 结果被截断时的提示，%s 是结果上限。 */
     val searchHasMore: String get() =
         pick("Showing the first %s results. Narrow your search.", "仅显示前 %s 条结果，请缩小搜索范围。")

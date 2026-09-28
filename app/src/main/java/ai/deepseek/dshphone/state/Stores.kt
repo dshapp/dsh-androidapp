@@ -442,7 +442,8 @@ class WorkspaceStore {
 
     val workspaceTitleBySession: Map<SessionId, String>
         get() = buildMap {
-            for (workspace in workspaces) for (id in workspace.sessionIds) put(id, workspace.title)
+            // 同一会话挂在多个工作区时取第一个（web `deriveSearchResults` 的 workspaceBySession）。
+            for (workspace in workspaces) for (id in workspace.sessionIds) if (id !in this) put(id, workspace.title)
         }
 
     fun setWorkspaces(items: List<WorkspaceView>, archived: List<SessionId>, pinned: List<SessionId>) {

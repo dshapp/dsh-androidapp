@@ -154,7 +154,8 @@ fun sessionWorkspaceName(workspaceTitle: String?, cwd: String?): String? {
 }
 
 /**
- * 本地搜索用的会话名：实时标题 / 投影标题 / cwd 目录名；三者都没有就是空串。
+ * 归档页本地筛选用的会话名：实时标题 / 投影标题 / cwd 目录名；三者都没有就是空串。
+ * （会话列表搜索对齐 web，直接匹配 [sessionDisplayTitle]。）
  *
  * 刻意不退回 sessionId：那是 [sessionDisplayTitle] 给无标题会话的兜底显示值，
  * 拿它参与子串匹配会让「session」这种常见词命中几乎每一条会话。
@@ -174,10 +175,25 @@ fun sessionSearchName(summary: SessionSummary, liveTitle: String?): String {
  * 用户至少还能按名字找到会话，而不是任何查询都空。
  */
 fun sessionMatchesSearch(title: String, workspaceName: String?, query: String): Boolean {
-    val needle = query.trim()
+    val needle = query.trim().lowercase()
     if (needle.isEmpty()) return false
-    return title.contains(needle, ignoreCase = true) ||
-        (workspaceName?.contains(needle, ignoreCase = true) == true)
+    return title.lowercase().contains(needle) ||
+        (workspaceName?.lowercase()?.contains(needle) == true)
+}
+
+/** `session/search` 查询的上限（web `SEARCH_QUERY_MAX_CODE_UNITS`）。 */
+private const val SESSION_SEARCH_QUERY_MAX_CODE_UNITS = 500
+
+/**
+ * web `sanitizeSearchQuery`：去掉 NUL，截到 500 个 UTF-16 code unit，不劈开代理对。
+ * 输入框每次改动都过一遍，查询与请求体因此始终落在协议约束内。
+ */
+fun sanitizeSessionSearchQuery(value: String): String {
+    val withoutNul = value.replace("\u0000", "")
+    if (withoutNul.length <= SESSION_SEARCH_QUERY_MAX_CODE_UNITS) return withoutNul
+    var end = SESSION_SEARCH_QUERY_MAX_CODE_UNITS
+    if (withoutNul[end - 1].isHighSurrogate() && withoutNul[end].isLowSurrogate()) end--
+    return withoutNul.substring(0, end)
 }
 
 /** 协议约定的搜索结果上限（web/Mac 的 `searchResultLimit` 都是 20）。 */
@@ -190,28 +206,26 @@ data class SessionSearchRows(
 )
 
 /**
- * 合并「本地标题命中的会话」与「主机内容命中的结果」。
+ * 合并「本地标题命中的会话」与「主机内容命中的结果」，即 web `deriveSearchResults`。
  *
- * 顺序与 web `deriveSearchResults` 一致：本地命中先出（[localMatches] 已按最近
- * 活动排序），主机命中补齐其余、按 sessionId 去重。空白会话与 subagent 来源的
- * 会话一律不进结果：前者是「新建会话」的占位，后者只在父会话的子智能体面板里存在。
- * 与 web/Mac 一样截到 [limit]，多出来的用 [SessionSearchRows.hasMore] 告知调用方。
+ * 本地命中先出（[localMatches] 已按最近活动排序），主机命中按后端顺序补齐、按
+ * sessionId 去重；[visibleById] 是列表可见口径（已滤掉空白、subagent、已归档），
+ * 不在其中的主机命中一律丢弃。截到 [limit]；后端还有更多或合并后超限都算 hasMore。
  */
 fun mergeSessionSearchResults(
     localMatches: List<SessionSummary>,
-    remoteHits: List<SessionSearchItem>,
-    byId: Map<SessionId, SessionSummary>,
+    remote: SessionSearchValue,
+    visibleById: Map<SessionId, SessionSummary>,
     limit: Int = SESSION_SEARCH_RESULT_LIMIT,
 ): SessionSearchRows {
     val ordered = mutableListOf<SessionSummary>()
     val seen = mutableSetOf<SessionId>()
     for (summary in localMatches) if (seen.add(summary.sessionId)) ordered.add(summary)
-    for (hit in remoteHits) {
-        val summary = byId[hit.sessionId] ?: continue
-        if (summary.blank || summary.isSubagentOrigin) continue
+    for (hit in remote.items) {
+        val summary = visibleById[hit.sessionId] ?: continue
         if (seen.add(summary.sessionId)) ordered.add(summary)
     }
-    return SessionSearchRows(ordered.take(limit), ordered.size > limit)
+    return SessionSearchRows(ordered.take(limit), remote.hasMore || ordered.size > limit)
 }
 
 // 列表行尾 ————————————————————————————————————————————————————

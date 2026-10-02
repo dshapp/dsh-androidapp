@@ -16,6 +16,11 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 // 可应答的审批 / 提问 ——————————————————————————————————————————
 
@@ -53,12 +58,50 @@ data class AskUserQuestionItem(
 )
 
 data class QuestionRequested(
+    /** 待应答 waterfall 的关联 id；continued 问题没有，它改走 `userQuestions/answer`。 */
     val eventId: String?,
     val sessionId: SessionId,
     val questions: List<AskUserQuestionItem>,
-)
+    /** 这组问题所属的 `ask_user_question` 调用（请求里的 `wait.callId`）。 */
+    val callId: String? = null,
+    /** 工具调用已经以 pending 返回：agent 继续干活，这时的回答是迟到回答。 */
+    val continued: Boolean = false,
+    /** 限时等待放行 agent 的时刻（epoch 毫秒，来自 `attachWait` 认领）；阻塞式提问或用户已按住时为 null。 */
+    val deadline: Long? = null,
+    /** 用户改了草稿或点了「慢慢回答」：本端一直按住等待，直到提交或取消。 */
+    val held: Boolean = false,
+) {
+    /** 弹层与草稿的稳定身份：倒计时开始、按住等待都不该把正在填的草稿重置掉。 */
+    val identity: String get() = if (eventId == null && callId != null) "call:$callId" else "event:$eventId"
+}
 
 data class QuestionAnswer(val id: String, val selected: List<String>, val custom: String? = null)
+
+/** 一整组答案的 wire 形状 `{answers:[{id, selected, custom?}]}`，waterfall 结果与迟到回答共用。 */
+fun questionAnswerPayload(answers: List<QuestionAnswer>): JsonObject = buildJsonObject {
+    put("answers", buildJsonArray {
+        for (answer in answers) {
+            add(buildJsonObject {
+                put("id", answer.id)
+                put("selected", buildJsonArray { answer.selected.forEach { add(JsonPrimitive(it)) } })
+                answer.custom?.let { put("custom", it) }
+            })
+        }
+    })
+}
+
+/**
+ * `userQuestions` 投影里还能作答的那一半：仍可回答的限时提问，按提问顺序。
+ * [state] 为 `open`（工具调用还可能直接拿到答案）或 `continued`（已 pending 返回）。
+ */
+data class UserQuestionRow(val callId: String, val questions: List<AskUserQuestionItem>, val state: String)
+
+fun decodeUserQuestions(value: JsonElement?): List<UserQuestionRow> =
+    (value["active"].arr ?: emptyList()).mapNotNull { row ->
+        val callId = row["callId"].str ?: return@mapNotNull null
+        val questions = (row["questions"].arr ?: emptyList()).mapNotNull { it.decodeOrNull<AskUserQuestionItem>() }
+        UserQuestionRow(callId, questions, row["state"].str ?: "open")
+    }
 
 /** 计划评审（exit_plan_mode）的路由与应答编码，与 iOS/web 完全一致。 */
 data class PlanReviewFlow(
@@ -118,6 +161,8 @@ data class QueuedInboxItem(
     val placement: String,
     val rpcId: String?,
     val content: List<JsonElement>,
+    /** 这是一条排队中的迟到提问回答时，它回答的那次调用。 */
+    val questionCallId: String? = null,
 ) {
     /** 队列条目的正文（内容块是 wire JSON，取其中的 text 字段）。 */
     val text: String get() = content.mapNotNull { it["text"].str }.joinToString(" ")
@@ -190,6 +235,7 @@ fun rowsFromInbox(value: SessionInboxValue): List<QueuedInboxItem> {
         placement = placement,
         rpcId = message.rpcId,
         content = message.content,
+        questionCallId = message.source?.takeIf { it["kind"].str == "user-question-reply" }?.let { it["callId"].str },
     )
     val turn = value.nextTurn.map { row(it, "queued") }
     val step = value.nextStep.map { row(it, if (it.source?.get("kind")?.str == "user") "steering" else "context") }

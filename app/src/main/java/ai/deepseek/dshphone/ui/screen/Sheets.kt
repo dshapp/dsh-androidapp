@@ -52,6 +52,12 @@ fun ModelPickerSheet(model: PhoneModel, sessionId: SessionId, onDismiss: () -> U
             ?.models?.firstOrNull { it.id == current.model }?.reasoning
     }
     val hasEfforts = !currentReasoning?.efforts.isNullOrEmpty()
+    // 模型搜索（web `ModelSelect`）：目录超过 4 个模型才出搜索框。
+    var query by remember { mutableStateOf("") }
+    val showSearch = directory.groups.sumOf { it.models.size } > MODEL_SEARCH_THRESHOLD
+    val visibleGroups = remember(directory.groups, query, showSearch) {
+        visibleModelGroups(directory.groups, if (showSearch) query else "")
+    }
 
     LaunchedEffect(sessionId) { model.loadModels(sessionId) }
 
@@ -75,6 +81,23 @@ fun ModelPickerSheet(model: PhoneModel, sessionId: SessionId, onDismiss: () -> U
                 }
             }
             val selecting = directory.status == ModelDirectoryStatus.SELECTING
+            if (showSearch && (tab == 0 || !hasEfforts)) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    placeholder = { Text(Strings.modelSearchPlaceholder) },
+                    leadingIcon = { Icon(Icons.Default.Search, null) },
+                    trailingIcon = {
+                        if (query.isNotEmpty()) {
+                            IconButton(onClick = { query = "" }) {
+                                Icon(Icons.Default.Clear, Strings.modelSearchClear)
+                            }
+                        }
+                    },
+                    singleLine = true,
+                )
+            }
             LazyColumn(
                 Modifier
                     .fillMaxWidth()
@@ -82,7 +105,17 @@ fun ModelPickerSheet(model: PhoneModel, sessionId: SessionId, onDismiss: () -> U
                 userScrollEnabled = !selecting,
             ) {
                 if (tab == 0 || !hasEfforts) {
-                    directory.groups.forEach { group ->
+                    if (visibleGroups.isEmpty() && query.isNotBlank()) {
+                        item(key = "search-empty") {
+                            Text(
+                                Strings.modelSearchEmpty,
+                                Modifier.padding(16.dp),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    visibleGroups.forEach { group ->
                         item(key = "g-${group.id}") {
                             Text(
                                 group.name,
@@ -597,8 +630,9 @@ fun QuestionSheet(model: PhoneModel, question: QuestionRequested, onDismiss: () 
     }
     // 逐题作答：一次只呈现一道题，翻页条显示进度，最后一题才提交整组答案
     // （与 Mac 的 QuestionFlow 卡片同一套流程状态）。
-    var flow by remember(question) { mutableStateOf(QuestionFlowState(question.questions)) }
-    var busy by remember(question) { mutableStateOf(false) }
+    // 按问题身份记草稿：倒计时开始、按住等待都会换一份 question 值，但不能把草稿重置掉。
+    var flow by remember(question.identity) { mutableStateOf(QuestionFlowState(question.questions)) }
+    var busy by remember(question.identity) { mutableStateOf(false) }
     val scroll = rememberScrollState()
     val item = flow.current
     val draft = flow.currentDraft
@@ -613,8 +647,14 @@ fun QuestionSheet(model: PhoneModel, question: QuestionRequested, onDismiss: () 
         onDismiss()
     }
 
+    // 任何改动都让限时等待一直开着，直到这张卡结掉（web `engage`）。
+    fun edit(state: QuestionFlowState) {
+        flow = state
+        model.holdQuestion(question)
+    }
+
     fun advance(step: QuestionFlowStep) {
-        flow = step.state
+        edit(step.state)
         if (step.submit) submit(step.state)
     }
 
@@ -645,7 +685,13 @@ fun QuestionSheet(model: PhoneModel, question: QuestionRequested, onDismiss: () 
                         onDismiss()
                     },
                     enabled = !busy,
-                ) { Icon(Icons.Filled.Close, contentDescription = Strings.questionCancel) }
+                ) {
+                    // continued 问题没有请求可拒，关掉只是收起。
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = if (question.continued) Strings.questionHide else Strings.questionCancel,
+                    )
+                }
             }
 
             Column(
@@ -689,7 +735,7 @@ fun QuestionSheet(model: PhoneModel, question: QuestionRequested, onDismiss: () 
                 }
                 OutlinedTextField(
                     value = draft.custom,
-                    onValueChange = { flow = flow.setCustom(it) },
+                    onValueChange = { edit(flow.setCustom(it)) },
                     label = {
                         // 无选项的题只能自填，这时输入框就是答案本身。
                         Text(
@@ -707,16 +753,19 @@ fun QuestionSheet(model: PhoneModel, question: QuestionRequested, onDismiss: () 
                 Modifier.padding(horizontal = 16.dp).padding(top = 4.dp, bottom = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                when (flow.validation) {
+                val feedback = when (flow.validation) {
                     QuestionFlowValidation.UNANSWERED -> Strings.questionErrorUnanswered
                     QuestionFlowValidation.INCOMPLETE -> Strings.questionErrorIncomplete
                     null -> null
-                }?.let {
+                }
+                if (feedback != null) {
                     Text(
-                        it,
+                        feedback,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
+                } else {
+                    QuestionWaitStatus(question) { model.holdQuestion(question) }
                 }
                 Row(
                     Modifier.fillMaxWidth(),
@@ -761,6 +810,32 @@ fun QuestionSheet(model: PhoneModel, question: QuestionRequested, onDismiss: () 
                 }
             }
         }
+    }
+}
+
+/** 限时等待的状态行（web `wait.*`）：倒计时 + 慢慢回答、已按住、已继续。 */
+@Composable
+private fun QuestionWaitStatus(question: QuestionRequested, onTakeTime: () -> Unit) {
+    val style = MaterialTheme.typography.bodySmall
+    val color = MaterialTheme.colorScheme.onSurfaceVariant
+    val deadline = question.deadline
+    when {
+        question.continued -> Text(Strings.questionWaitContinued, style = style, color = color)
+        deadline != null -> {
+            var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+            LaunchedEffect(deadline) {
+                while (now < deadline) {
+                    kotlinx.coroutines.delay(1000 - (now % 1000))
+                    now = System.currentTimeMillis()
+                }
+            }
+            val seconds = ((deadline - now + 999) / 1000).coerceAtLeast(0).toInt()
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(fmt(Strings.questionWaitCountdown, seconds), style = style, color = color)
+                TextButton(onClick = onTakeTime) { Text(Strings.questionWaitTakeTime) }
+            }
+        }
+        question.held -> Text(Strings.questionWaitHeld, style = style, color = color)
     }
 }
 

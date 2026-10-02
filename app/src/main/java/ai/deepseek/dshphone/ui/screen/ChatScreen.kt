@@ -246,7 +246,7 @@ fun ChatScreen(
     }
 
     val summary = model.listStore.sessionsById[sessionId]
-    val title = summary?.let { sessionDisplayTitle(it, store?.title) } ?: Strings.untitledSession
+    val title = summary?.let { sessionDisplayTitle(it, store?.title) } ?: Strings.sessionUntitled
     val cwd = summary?.cwd
 
     Scaffold(
@@ -582,8 +582,8 @@ fun ChatScreen(
     store?.pendingApproval?.let { approval ->
         ApprovalSheet(model, approval) { store.setApproval(null) }
     }
-    store?.pendingQuestion?.let { question ->
-        QuestionSheet(model, question) { store.setQuestion(null) }
+    store?.presentedQuestion?.let { question ->
+        QuestionSheet(model, question) { model.dismissQuestion(question) }
     }
 }
 

@@ -141,8 +141,8 @@ fun SessionListScreen(
     // 所以命中有两个来源、合并后才完整：已经在列表里的标题/工作区名本地匹配，加上主机
     // 返回的内容命中。与 web `deriveSearchResults`、Mac 边栏同一口径。
     //
-    // 标题口径与列表行同一个 [sessionDisplayTitle]（实时标题 → 投影标题 → cwd 目录名 →
-    // sessionId），工作区名与行的灰色前缀同源，本地臂按 updatedAt 新到旧、同刻按 id 排。
+    // 标题只匹配会话自己的 [sessionStoredTitle]（实时标题 → 投影标题；未命名为空，0.2.0 起
+    // 不再回落到 cwd 目录名或 sessionId），工作区名与行的灰色前缀同源，本地臂按 updatedAt 新到旧、同刻按 id 排。
     // 主机命中只认「属于当前查询」的那一页；换查询到答复落地之前都是 pending。
     //
     // 只在查询或名单变化时重建，查找表提到循环外各取一次：`workspaceTitleBySession` 是每次
@@ -162,7 +162,7 @@ fun SessionListScreen(
             val localMatches = listed
                 .filter { summary ->
                     sessionMatchesSearch(
-                        sessionDisplayTitle(summary, model.sessions[summary.sessionId]?.title),
+                        sessionStoredTitle(summary, model.sessions[summary.sessionId]?.title),
                         sessionWorkspaceName(workspaceTitles[summary.sessionId], summary.cwd),
                         normalizedSearchQuery,
                     )
@@ -366,7 +366,7 @@ fun SessionListScreen(
                         items(hits, key = { it.sessionId }) { summary ->
                             SessionRow(
                                 model, summary, onOpenSession,
-                                onRename = { renameText = titleOf(model, summary); renaming = summary },
+                                onRename = { renameText = sessionStoredTitle(summary, model.sessions[summary.sessionId]?.title); renaming = summary },
                             )
                         }
                         // 主机内容命中还没回来：本地命中照常先出，末尾留一个进度行（web 的骨架行）。
@@ -398,7 +398,7 @@ fun SessionListScreen(
                                 items(group.sessions.filter { it.running }, key = { it.sessionId }) { summary ->
                                     SessionRow(
                                         model, summary, onOpenSession,
-                                        onRename = { renameText = titleOf(model, summary); renaming = summary },
+                                        onRename = { renameText = sessionStoredTitle(summary, model.sessions[summary.sessionId]?.title); renaming = summary },
                                     )
                                 }
                             }
@@ -408,7 +408,7 @@ fun SessionListScreen(
                                 items(shown, key = { it.sessionId }) { summary ->
                                     SessionRow(
                                         model, summary, onOpenSession,
-                                        onRename = { renameText = titleOf(model, summary); renaming = summary },
+                                        onRename = { renameText = sessionStoredTitle(summary, model.sessions[summary.sessionId]?.title); renaming = summary },
                                     )
                                 }
                                 if (shown.size < group.sessions.size) {

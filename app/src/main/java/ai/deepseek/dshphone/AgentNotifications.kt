@@ -90,7 +90,7 @@ class AgentNotifications(private val context: Context) {
     private fun title(model: PhoneModel, sessionId: String): String =
         model.listStore.sessionsById[sessionId]
             ?.let { sessionDisplayTitle(it, model.sessions[sessionId]?.title) }
-            ?: Strings.untitledSession
+            ?: Strings.sessionUntitled
 
     /**
      * 子智能体不发通知（与 Mac 的 AgentNotificationCenter.post 同一道闸）。

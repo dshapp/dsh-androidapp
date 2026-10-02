@@ -106,6 +106,15 @@ class SessionStore(val sessionId: SessionId) {
         private set
     var pendingQuestion by mutableStateOf<QuestionRequested?>(null)
         private set
+    /** `userQuestions` 投影：本会话里仍可作答的限时提问。 */
+    var userQuestions by mutableStateOf<List<UserQuestionRow>>(emptyList())
+        private set
+    /** 用户收起了弹层的 continued 问题（web `nav.close`）：仍可作答，输入框上方给入口重开。 */
+    var hiddenQuestionCalls by mutableStateOf<Set<String>>(emptySet())
+        private set
+    /** 本端已经迟到作答的 continued 问题，在投影把它结掉之前先藏起来。 */
+    var repliedQuestionCalls by mutableStateOf<Set<String>>(emptySet())
+        private set
     var queue by mutableStateOf<List<QueuedInboxItem>>(emptyList())
         private set
     /**
@@ -642,7 +651,9 @@ class SessionStore(val sessionId: SessionId) {
             sourceKind == "user" ->
                 if (claimedSteeringIds.contains(id)) ChatNode.Steering(event.seq, event.time, id, content)
                 else ChatNode.User(event.seq, event.time, id, content)
-            isWaking(id) -> ChatNode.TurnTrigger(TurnTriggerNode(event.seq, event.time, id, content, source))
+            // 迟到的提问回答是用户自己的答案（web `question-reply` 节点），不论它是否唤醒了这一轮都要画。
+            isWaking(id) || sourceKind == "user-question-reply" ->
+                ChatNode.TurnTrigger(TurnTriggerNode(event.seq, event.time, id, content, source))
             // 0.1.7 起普通上下文注入不进聊天（web `isVisibleChatNode`），轨迹页才看。
             else -> return
         }
@@ -1236,6 +1247,7 @@ class SessionStore(val sessionId: SessionId) {
         sessionStats = null
         imageLimits = null
         permissionProjection = null
+        userQuestions = emptyList()
         changesSeqByTurn.clear()
         refreshPermissions()
         for ((key, pair) in projections) decodeSingleProjection(key, pair.first)
@@ -1285,6 +1297,7 @@ class SessionStore(val sessionId: SessionId) {
                 // 行位置（queued / steering / context）由客户端本地推导，再按原快照语义整体应用。
                 decodeInbox(value)?.let { applyQueue(rowsFromInbox(it)) }
             "agentPreset" -> value.str?.takeIf { it.isNotEmpty() }?.let { agentPreset = it }
+            "userQuestions" -> userQuestions = decodeUserQuestions(value)
             "modelSelection" -> value["next"]?.decodeOrNull<ModelSelection>()?.let {
                 modelDirectory = modelDirectory.applyProjectedSelection(it)
             }
@@ -1624,6 +1637,29 @@ class SessionStore(val sessionId: SessionId) {
     fun setApproval(approval: ApprovalRequested?) { pendingApproval = approval }
 
     fun setQuestion(question: QuestionRequested?) { pendingQuestion = question }
+
+    fun hideQuestion(callId: String) { hiddenQuestionCalls = hiddenQuestionCalls + callId }
+
+    fun reopenQuestion(callId: String) { hiddenQuestionCalls = hiddenQuestionCalls - callId }
+
+    fun markQuestionReplied(callId: String) { repliedQuestionCalls = repliedQuestionCalls + callId }
+
+    /**
+     * 可在输入区作答的 continued 问题（web `publishContinuedQuestions`）：投影里 continued 的行，
+     * 去掉已经在 inbox 里排着回答、或本端已经答过的。
+     */
+    val continuedQuestions: List<QuestionRequested>
+        get() {
+            val queued = queue.mapNotNull { it.questionCallId }.toSet()
+            return userQuestions.mapNotNull { row ->
+                if (row.state != "continued" || row.callId in queued || row.callId in repliedQuestionCalls) null
+                else QuestionRequested(null, sessionId, row.questions, callId = row.callId, continued = true)
+            }
+        }
+
+    /** 弹层该呈现的问题：实时 waterfall 优先，否则是第一个没被收起的 continued 问题。 */
+    val presentedQuestion: QuestionRequested?
+        get() = pendingQuestion ?: continuedQuestions.firstOrNull { it.callId !in hiddenQuestionCalls }
 
     /**
      * 记下一条 `workspace/changes` 公告（对齐 Mac `applyWorkspaceChanges`）。

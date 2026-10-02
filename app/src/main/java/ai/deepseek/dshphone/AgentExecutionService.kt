@@ -49,7 +49,15 @@ class AgentExecutionService : Service() {
         }.onFailure {
             Log.w(TAG, "startForeground rejected: ${it.javaClass.simpleName}: ${it.message}")
         }
-        if (started.isFailure) stopSelf()
+        if (started.isFailure) { stopSelf(); return }
+        inForeground = true
+        // 起服务之后、onCreate 之前任务就结束了（很短的一轮）：前台已经补上，现在再收。
+        if (!wanted) stopSelf()
+    }
+
+    override fun onDestroy() {
+        inForeground = false
+        super.onDestroy()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
@@ -91,7 +99,14 @@ class AgentExecutionService : Service() {
         /** 常驻通知的固定 id：与按会话 id 哈希的完成卡片互不冲突。 */
         const val NOTIFICATION_ID = 0x44534801
 
+        /** 当前是否还想要这个服务（start/stop 都在主线程上调）。 */
+        private var wanted = false
+
+        /** 服务已经 startForeground。 */
+        private var inForeground = false
+
         fun start(context: Context) {
+            wanted = true
             val intent = Intent(context, AgentExecutionService::class.java)
             runCatching {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -102,7 +117,14 @@ class AgentExecutionService : Service() {
             }.onFailure { Log.w(TAG, "start failed: ${it.message}") }
         }
 
+        /**
+         * startForegroundService 之后系统要求服务必须 startForeground，哪怕它马上就被停掉：
+         * 在 onCreate 之前 stopService 会以 ForegroundServiceDidNotStartInTimeException 崩掉整个进程
+         *（一轮在几百毫秒内跑完就会撞上）。所以还没进前台时只记下意图，由 onCreate 补完前台再收。
+         */
         fun stop(context: Context) {
+            wanted = false
+            if (!inForeground) return
             runCatching { context.stopService(Intent(context, AgentExecutionService::class.java)) }
         }
     }

@@ -26,11 +26,16 @@ import kotlin.math.roundToLong
  */
 private val FIXED_LOCALE: Locale = Locale.ROOT
 
+/**
+ * 整秒向下取（web `formatRunDuration`）：每个数字后面跟本地化单位、不补零；满 60 秒出分钟，
+ * 满 60 分钟出小时——「5s / 2m 5s / 1h 0m 3s」「5秒 / 2分5秒 / 1小时0分3秒」。
+ */
 fun formatDuration(ms: Double): String {
-    val total = max(0.0, ms / 1000).toInt()
-    val minutes = total / 60
-    val seconds = total % 60
-    return if (minutes > 0) fmt(Strings.durationMinutes, minutes, seconds) else fmt(Strings.durationSeconds, seconds)
+    val total = if (ms.isNaN()) 0L else max(0.0, ms / 1000).toLong()
+    val text = StringBuilder()
+    if (total >= 3600) text.append(total / 3600).append(Strings.durationHourUnit)
+    if (total >= 60) text.append(total / 60 % 60).append(Strings.durationMinuteUnit)
+    return text.append(total % 60).append(Strings.durationSecondUnit).toString()
 }
 
 /**
@@ -126,19 +131,24 @@ fun pathBasename(path: String): String {
     return trimmed.split('/', '\\').lastOrNull().orEmpty()
 }
 
-fun sessionDisplayTitle(summary: SessionSummary): String {
-    summary.projections?.values?.get("title").str?.takeIf { it.isNotEmpty() }?.let { return it }
-    summary.cwd?.takeIf { it.isNotEmpty() }?.let { cwd ->
-        val base = pathBasename(cwd)
-        if (base.isNotEmpty()) return base
-    }
-    return summary.sessionId
+/**
+ * 会话的显示标题（web `displayTitle`）：空白会话是「新会话」占位，然后是打开中会话的实时标题、
+ * 投影标题；都没有就显示「未命名」——0.2.0 起 web 不再拿目录名或 sessionId 兜底。
+ */
+fun sessionDisplayTitle(summary: SessionSummary, liveTitle: String? = null): String {
+    if (summary.blank) return Strings.newSessionPlaceholder
+    return sessionStoredTitle(summary, liveTitle).ifEmpty { Strings.sessionUntitled }
 }
 
-fun sessionDisplayTitle(summary: SessionSummary, liveTitle: String?): String {
-    if (summary.blank) return Strings.newSessionPlaceholder
-    if (!liveTitle.isNullOrEmpty()) return liveTitle
-    return sessionDisplayTitle(summary)
+/**
+ * 会话自己的标题（web `titleOf`）：实时标题 → 投影标题，去掉首尾空白；没有就是空串。
+ *
+ * 搜索只匹配这一份：未命名会话不能再借一个已经不显示的目录名命中搜索。
+ */
+fun sessionStoredTitle(summary: SessionSummary, liveTitle: String?): String {
+    if (summary.blank) return ""
+    liveTitle?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+    return summary.projections?.values?.get("title").str?.trim().orEmpty()
 }
 
 /**
@@ -151,19 +161,6 @@ fun sessionWorkspaceName(workspaceTitle: String?, cwd: String?): String? {
     workspaceTitle?.takeIf { it.isNotEmpty() }?.let { return it }
     val base = cwd?.takeIf { it.isNotEmpty() }?.let { pathBasename(it) }.orEmpty()
     return base.takeIf { it.isNotEmpty() }
-}
-
-/**
- * 归档页本地筛选用的会话名：实时标题 / 投影标题 / cwd 目录名；三者都没有就是空串。
- * （会话列表搜索对齐 web，直接匹配 [sessionDisplayTitle]。）
- *
- * 刻意不退回 sessionId：那是 [sessionDisplayTitle] 给无标题会话的兜底显示值，
- * 拿它参与子串匹配会让「session」这种常见词命中几乎每一条会话。
- */
-fun sessionSearchName(summary: SessionSummary, liveTitle: String?): String {
-    if (!liveTitle.isNullOrEmpty()) return liveTitle
-    summary.projections?.values?.get("title").str?.takeIf { it.isNotEmpty() }?.let { return it }
-    return summary.cwd?.takeIf { it.isNotEmpty() }?.let { pathBasename(it) }.orEmpty()
 }
 
 /**

@@ -188,6 +188,7 @@ class ApiClient(target: MobileTarget) {
                     put("error", buildJsonObject {
                         put("name", outcome.name)
                         put("message", outcome.message)
+                        outcome.code?.let { put("code", it) }
                     })
                 }
             }

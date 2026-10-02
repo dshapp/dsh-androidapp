@@ -73,6 +73,10 @@ class StreamCoordinator(
         const val JOB_OUTPUT = "job-output"
         fun sessionIdOfJobs(streamId: String): SessionId? =
             if (streamId.startsWith("jobs:")) streamId.removePrefix("jobs:") else null
+        /** 一个限时提问的前台等待认领（`userQuestions/attachWait`），按 waterfall 事件分。 */
+        fun questionWaitStreamId(eventId: String) = "question-wait:$eventId"
+        fun eventIdOfQuestionWait(streamId: String): String? =
+            if (streamId.startsWith("question-wait:")) streamId.removePrefix("question-wait:") else null
     }
 
     private var mux: MuxStream? = null
@@ -87,6 +91,11 @@ class StreamCoordinator(
 
     private val removedSessionIds = mutableSetOf<SessionId>()
     private val pendingEventSessions = mutableMapOf<String, SessionId>()
+    /**
+     * 每个已认领限时提问的倒计时，按 waterfall 事件分。计时归 coordinator 而不归弹层
+     *（web `PendingQuestion`）：弹层不在屏上也得按时超时，否则认领会把 agent 卡过期限。
+     */
+    private val questionTimers = mutableMapOf<String, Job>()
     /** 0.1.5 的 control 队列状态（baseline 的 queues 块与 queue 帧）；0.1.6 不再有这条通道。 */
     private val queues = mutableMapOf<SessionId, List<QueuedInboxItem>>()
     /**
@@ -222,6 +231,7 @@ class StreamCoordinator(
 
     private fun dropStaleInteractions() {
         remoteEventClientId = null
+        pendingEventSessions.keys.forEach { endQuestionWait(it) }
         pendingEventSessions.clear()
         listStore.clearAllAwaitingUser()
         for (store in allSessions()) {
@@ -259,6 +269,10 @@ class StreamCoordinator(
             CONTROL -> handleControl(decodeControlFrame(value))
             JOB_OUTPUT -> observedJob = observedJob?.folding(decodeJobFollowFrame(value))
             else -> {
+                eventIdOfQuestionWait(streamId)?.let { eventId ->
+                    value["remainingMs"].dbl?.let { startQuestionCountdown(eventId, it) }
+                    return
+                }
                 sessionIdOfJobs(streamId)?.let { sessionId ->
                     if (removedSessionIds.contains(sessionId)) return
                     decodeJobListFrame(value)?.let { sessionUpsert(sessionId).replaceJobs(it) }
@@ -346,7 +360,20 @@ class StreamCoordinator(
                     .mapNotNull { it.decodeOrNull<AskUserQuestionItem>() }
                 if (questions.isEmpty()) return
                 pendingEventSessions[frame.eventId] = sessionId
-                val question = QuestionRequested(frame.eventId, sessionId, questions)
+                val wait = frame.request["wait"]
+                val question = QuestionRequested(frame.eventId, sessionId, questions, callId = wait["callId"].str)
+                // 限时等待先认领再计时（web `answerQuestion`）：认领流的第一帧是主机算好的剩余时长，
+                // 握着认领才轮到本端（而不是主机的计时器）决定何时超时。
+                if (wait["timed"].bool == true && question.callId != null) {
+                    mux?.subscribe(
+                        questionWaitStreamId(frame.eventId),
+                        "userQuestions/attachWait",
+                        buildJsonObject {
+                            put("agentId", sessionId)
+                            put("callId", question.callId)
+                        },
+                    )
+                }
                 val store = sessionUpsert(sessionId)
                 store.setQuestion(question)
                 syncAwaitingUser(sessionId, store)
@@ -355,13 +382,77 @@ class StreamCoordinator(
         }
     }
 
+    /**
+     * 本端自己应答了一个 waterfall：应答方收不到自己那份结果的撤回帧，所以在这里就地撤掉
+     *（认领、倒计时、通知、边栏徽标）。
+     */
+    fun retireLocally(eventId: String?) {
+        if (eventId != null) retireWaterfall(eventId)
+    }
+
     private fun retireWaterfall(eventId: String) {
+        endQuestionWait(eventId)
         val sessionId = pendingEventSessions.remove(eventId) ?: return
         attentionHandler(AttentionSignal.WaterfallRetired(sessionId, eventId))
         val store = sessionLookup(sessionId) ?: return
         if (store.pendingApproval?.eventId == eventId) store.setApproval(null)
         if (store.pendingQuestion?.eventId == eventId) store.setQuestion(null)
         syncAwaitingUser(sessionId, store)
+    }
+
+    /** 按主机给的剩余时间给一个已认领的提问上倒计时。 */
+    private fun startQuestionCountdown(eventId: String, remainingMs: Double) {
+        val sessionId = pendingEventSessions[eventId] ?: return
+        val store = sessionLookup(sessionId) ?: return
+        val question = store.pendingQuestion?.takeIf { it.eventId == eventId } ?: return
+        if (question.held) return
+        val delayMs = remainingMs.toLong().coerceAtLeast(0)
+        store.setQuestion(question.copy(deadline = System.currentTimeMillis() + delayMs))
+        questionTimers.remove(eventId)?.cancel()
+        questionTimers[eventId] = scope.launch {
+            kotlinx.coroutines.delay(delayMs)
+            expireQuestion(eventId)
+        }
+    }
+
+    /**
+     * 用户开始作答或点了「慢慢回答」（web `engage`/`takeTime`）：停掉倒计时，认领一直握着，
+     * agent 就一直等到本端提交或取消。
+     */
+    fun holdQuestion(question: QuestionRequested) {
+        val eventId = question.eventId ?: return
+        val store = sessionLookup(question.sessionId) ?: return
+        val pending = store.pendingQuestion?.takeIf { it.eventId == eventId } ?: return
+        if (pending.held || pending.deadline == null) return
+        questionTimers.remove(eventId)?.cancel()
+        store.setQuestion(pending.copy(held = true, deadline = null))
+    }
+
+    /**
+     * 倒计时走完、用户没碰过：以 `ASK_TIMED_OUT` 回执 waterfall，主机把它映射成 pending 结果，
+     * agent 继续干活；这组问题随后作为 continued 问题回来。弹层被本地收起也照样超时，
+     * 否则 agent 会一直被这份认领挡着。
+     */
+    private suspend fun expireQuestion(eventId: String) {
+        val sessionId = pendingEventSessions[eventId] ?: return
+        val pending = sessionLookup(sessionId)?.pendingQuestion
+        if (pending?.eventId == eventId && pending.held) return
+        val clientId = remoteEventClientId ?: return
+        api.settleRemoteEvent(
+            clientId, eventId,
+            RemoteEventOutcome.Rejected(
+                name = "UserQuestionError",
+                message = "ask_user_question timed out before the user answered",
+                code = "ASK_TIMED_OUT",
+            ),
+        )
+        retireWaterfall(eventId)
+    }
+
+    /** 放掉一个提问的认领与倒计时。 */
+    private fun endQuestionWait(eventId: String) {
+        questionTimers.remove(eventId)?.cancel()
+        mux?.unsubscribe(questionWaitStreamId(eventId))
     }
 
     private fun syncAwaitingUser(sessionId: SessionId, store: SessionStore) {

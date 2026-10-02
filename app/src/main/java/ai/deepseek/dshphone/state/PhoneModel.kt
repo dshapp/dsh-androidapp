@@ -1309,32 +1309,54 @@ class PhoneModel private constructor(app: Application) {
     }
 
     fun respondQuestion(question: QuestionRequested, answers: List<QuestionAnswer>) {
-        scope.launch {
-            val payload = kotlinx.serialization.json.buildJsonObject {
-                put("answers", kotlinx.serialization.json.buildJsonArray {
-                    for (answer in answers) {
-                        add(kotlinx.serialization.json.buildJsonObject {
-                            put("id", kotlinx.serialization.json.JsonPrimitive(answer.id))
-                            put("selected", kotlinx.serialization.json.buildJsonArray {
-                                answer.selected.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) }
-                            })
-                            answer.custom?.let { put("custom", kotlinx.serialization.json.JsonPrimitive(it)) }
-                        })
+        val callId = question.callId
+        if (question.continued && callId != null) {
+            // continued 问题已经没有 waterfall 可回执：迟到回答走 userQuestions/answer。
+            scope.launch {
+                try {
+                    if (api?.answerUserQuestion(question.sessionId, callId, answers) == true) {
+                        sessions[question.sessionId]?.markQuestionReplied(callId)
                     }
-                })
+                } catch (e: Exception) { lastErrorMessage = describe(e) }
             }
-            settle(question.eventId, RemoteEventOutcome.Result(payload))
+            return
+        }
+        scope.launch {
+            settle(question.eventId, RemoteEventOutcome.Result(questionAnswerPayload(answers)))
             sessions[question.sessionId]?.setQuestion(null)
+            coordinator?.retireLocally(question.eventId)
             listStore.clearAwaitingUser(question.sessionId)
         }
     }
 
     fun cancelQuestion(question: QuestionRequested) {
+        val callId = question.callId
+        if (question.continued && callId != null) {
+            // continued 问题没有请求可拒：关掉只是收起，输入框上方的入口能重新打开。
+            sessions[question.sessionId]?.hideQuestion(callId)
+            return
+        }
         scope.launch {
             settle(question.eventId, RemoteEventOutcome.Next)
             sessions[question.sessionId]?.setQuestion(null)
+            coordinator?.retireLocally(question.eventId)
             listStore.clearAwaitingUser(question.sessionId)
         }
+    }
+
+    /** 用户开始作答或点了「慢慢回答」：限时提问停止倒计时，一直等到本端提交或取消。 */
+    fun holdQuestion(question: QuestionRequested) {
+        coordinator?.holdQuestion(question)
+    }
+
+    /**
+     * 不作答、只把弹层划走：实时问题在本地撤下（倒计时照走，到点仍会放行 agent），
+     * continued 问题收起；两者都不会再自己弹出来，留给输入框上方的入口。
+     */
+    fun dismissQuestion(question: QuestionRequested) {
+        val store = sessions[question.sessionId] ?: return
+        question.callId?.let { store.hideQuestion(it) }
+        if (!question.continued && store.pendingQuestion?.eventId == question.eventId) store.setQuestion(null)
     }
 
     private suspend fun settle(eventId: String?, outcome: RemoteEventOutcome) {

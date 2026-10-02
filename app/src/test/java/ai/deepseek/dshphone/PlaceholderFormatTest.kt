@@ -47,8 +47,8 @@ class PlaceholderFormatTest {
 
     @Test
     fun mixedTemplatesStayAsciiDigits() {
-        // durationMinutes 同时含 %d 与 %02d；两者都不能变成本地数字。
-        assertEquals("2m 07s", fmt(Strings.durationMinutes, 2, 7))
+        // 一个模板里多个 %d；都不能变成本地数字。
+        assertEquals("1 / 2", fmt(Strings.questionProgress, 1, 2))
         assertEquals("3 turns 12 steps", fmt(Strings.statsCounts, 3, 12))
     }
 

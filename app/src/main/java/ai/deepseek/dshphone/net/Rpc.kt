@@ -41,5 +41,6 @@ data class ServerResponse(
 sealed interface RemoteEventOutcome {
     data class Result(val value: JsonElement?) : RemoteEventOutcome
     data object Next : RemoteEventOutcome
-    data class Rejected(val name: String, val message: String) : RemoteEventOutcome
+    /** 让请求失败；[code] 随错误一起送到提问方（如限时提问的 `ASK_TIMED_OUT`）。 */
+    data class Rejected(val name: String, val message: String, val code: String? = null) : RemoteEventOutcome
 }

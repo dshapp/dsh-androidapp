@@ -220,6 +220,9 @@ fun ComposerBar(
             header?.invoke()
             TodoStrip(store)
             GoalBar(model, sessionId, store)
+            if (store != null && store.presentedQuestion == null) {
+                store.continuedQuestions.firstOrNull()?.let { HiddenQuestionStrip(store, it) }
+            }
             if (store != null && store.queued.isNotEmpty()) QueueStrip(model, sessionId, store)
             if (suggestions.isNotEmpty()) {
                 SuggestionList(suggestions) { suggestion ->
@@ -790,6 +793,31 @@ private fun GoalBar(model: PhoneModel, sessionId: SessionId, store: SessionStore
  * 看起来就像按钮没反应（重复点还会撞上主机的 steer-unavailable）。它改由转写尾部的
  * 待定气泡（ChatScreen 里的 pendingSteering）接管显示。
  */
+/**
+ * 被收起的 continued 问题：agent 已经继续干活，这组问题仍可回答，点「回答」重新打开弹层
+ *（web 从工具行重开）。
+ */
+@Composable
+private fun HiddenQuestionStrip(store: SessionStore, question: QuestionRequested) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(Dimens.stripRowHeight),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Dimens.stripSpacing),
+    ) {
+        Icon(Icons.AutoMirrored.Filled.HelpOutline, null, Modifier.size(16.dp),
+            MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(question.questions.firstOrNull()?.question ?: Strings.questionWaitContinued,
+            Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        TextButton(onClick = { question.callId?.let { store.reopenQuestion(it) } }) {
+            Text(Strings.questionReopen)
+        }
+    }
+}
+
 @Composable
 private fun QueueStrip(model: PhoneModel, sessionId: SessionId, store: SessionStore) {
     var editing by remember { mutableStateOf<QueuedInboxItem?>(null) }

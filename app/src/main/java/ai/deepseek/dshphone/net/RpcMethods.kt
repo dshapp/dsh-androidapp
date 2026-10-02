@@ -12,6 +12,8 @@ import ai.deepseek.dshphone.model.HistoryEntry
 import ai.deepseek.dshphone.model.ModelCatalogValue
 import ai.deepseek.dshphone.model.PermissionCatalogValue
 import ai.deepseek.dshphone.model.PermissionPresetOption
+import ai.deepseek.dshphone.model.QuestionAnswer
+import ai.deepseek.dshphone.model.questionAnswerPayload
 import ai.deepseek.dshphone.model.SessionAddress
 import ai.deepseek.dshphone.model.TurnChangesSummary
 import ai.deepseek.dshphone.model.SessionAttachmentValue
@@ -398,6 +400,21 @@ suspend fun ApiClient.agentPresetList(): AgentPresetListValue =
 suspend fun ApiClient.agentPresetSelect(sessionId: SessionId, agentPreset: String) {
     call("agentPresets/select", buildJsonObject { put("agentId", sessionId); put("agentPreset", agentPreset) })
 }
+
+// —— 限时提问（0.2.0）——————————————————————————————————————————
+
+/**
+ * 给一个已继续（continued）的 `ask_user_question` 迟到作答：主机把它作为
+ * `user-question-reply` 消息插进 agent。
+ *
+ * @returns 问题已不再是 continued 时为 false；已有一条回答在排队时主机报 `REPLY_QUEUED`。
+ */
+suspend fun ApiClient.answerUserQuestion(sessionId: SessionId, callId: String, answers: List<QuestionAnswer>): Boolean =
+    call("userQuestions/answer", buildJsonObject {
+        put("agentId", sessionId)
+        put("callId", callId)
+        put("answer", questionAnswerPayload(answers))
+    }).bool == true
 
 // —— 目标 ——————————————————————————————————————————————————————
 

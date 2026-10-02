@@ -339,6 +339,11 @@ private fun AssistantRow(
 /** 轮次触发通知：谁唤醒了这一轮（定时任务、后台任务、插件……），正文在详情里看。 */
 @Composable
 private fun TurnTriggerRow(data: TurnTriggerNode) {
+    val reply = remember(data) { data.questionReply }
+    if (reply != null) {
+        QuestionReplyRow(reply)
+        return
+    }
     var detail by remember { mutableStateOf(false) }
     val title = turnTriggerTitle(data.kind)
     val icon = turnTriggerIcon(data.kind)
@@ -358,6 +363,28 @@ private fun TurnTriggerRow(data: TurnTriggerNode) {
     }
 }
 
+/**
+ * 迟到的提问回答是用户自己的短答（web `QuestionReplyView`）：问题和答案直接铺开，
+ * 没有可展开的详情。
+ */
+@Composable
+private fun QuestionReplyRow(pairs: List<QuestionReplyPair>) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        CardRow(turnTriggerIcon(TurnTriggerKind.QUESTION_REPLY), Strings.questionReplyLabel)
+        pairs.forEach { pair ->
+            Column(Modifier.padding(start = Dimens.iconSlot + 6.dp)) {
+                Text(pair.question, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    Strings.questionReplyAnswer +
+                        (pair.answers.takeIf { it.isNotEmpty() }?.joinToString(", ") ?: Strings.questionReplySkipped),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
 private fun turnTriggerTitle(kind: TurnTriggerKind): String = when (kind) {
     TurnTriggerKind.REQUEST -> Strings.turnTriggerRequest
     TurnTriggerKind.GOAL -> Strings.turnTriggerGoal
@@ -369,6 +396,7 @@ private fun turnTriggerTitle(kind: TurnTriggerKind): String = when (kind) {
     TurnTriggerKind.SCHEDULE -> Strings.turnTriggerSchedule
     TurnTriggerKind.JOB -> Strings.turnTriggerJob
     TurnTriggerKind.PLUGIN -> Strings.turnTriggerPlugin
+    TurnTriggerKind.QUESTION_REPLY -> Strings.questionReplyLabel
 }
 
 private fun turnTriggerIcon(kind: TurnTriggerKind): ImageVector = when (kind) {
@@ -379,9 +407,10 @@ private fun turnTriggerIcon(kind: TurnTriggerKind): ImageVector = when (kind) {
     TurnTriggerKind.SUBAGENT -> Icons.Default.HowToReg
     TurnTriggerKind.GITHUB -> Icons.AutoMirrored.Filled.CallSplit
     TurnTriggerKind.WEBHOOK -> Icons.Default.Public
-    TurnTriggerKind.SCHEDULE -> Icons.Default.Alarm
+    TurnTriggerKind.SCHEDULE -> Icons.Default.Schedule
     TurnTriggerKind.JOB -> Icons.AutoMirrored.Filled.List
     TurnTriggerKind.PLUGIN -> Icons.Default.Extension
+    TurnTriggerKind.QUESTION_REPLY -> Icons.AutoMirrored.Filled.Reply
 }
 
 @Composable

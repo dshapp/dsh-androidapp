@@ -219,11 +219,35 @@ data class TurnTriggerNode(
             "schedule" -> TurnTriggerKind.SCHEDULE
             "tool-jobs" -> TurnTriggerKind.JOB
             "cordis-host-runner" -> TurnTriggerKind.PLUGIN
+            "user-question-reply" -> TurnTriggerKind.QUESTION_REPLY
             else -> TurnTriggerKind.REQUEST
+        }
+
+    /**
+     * 迟到的 `ask_user_question` 回答（web `question-reply` 节点）：从消息正文那份
+     * `answer_to_pending_question` JSON 里读出「问题 → 答案」；别的消息是 null。
+     */
+    val questionReply: List<QuestionReplyPair>?
+        get() {
+            if (source["kind"].str != "user-question-reply") return null
+            val text = content.filterIsInstance<ContentBlock.Text>().firstOrNull()?.text ?: return null
+            val json = runCatching { DshJson.parseToJsonElement(text) }.getOrNull() ?: return null
+            val questions = json["questions"].arr ?: return null
+            val answers = json["answers"].arr ?: emptyList()
+            return questions.map { question ->
+                val id = question["id"].str
+                val answer = answers.firstOrNull { it["id"].str == id }
+                val values = (answer["selected"].arr ?: emptyList()).mapNotNull { it.str } +
+                    listOfNotNull(answer["custom"].str?.takeIf { it.isNotEmpty() })
+                QuestionReplyPair(question["question"].str.orEmpty(), values)
+            }
         }
 }
 
-enum class TurnTriggerKind { REQUEST, GOAL, AGENT, TEAM, SUBAGENT, GITHUB, WEBHOOK, SCHEDULE, JOB, PLUGIN }
+/** 一道题和它的答案：选中的选项加自填文字；跳过时为空。 */
+data class QuestionReplyPair(val question: String, val answers: List<String>)
+
+enum class TurnTriggerKind { REQUEST, GOAL, AGENT, TEAM, SUBAGENT, GITHUB, WEBHOOK, SCHEDULE, JOB, PLUGIN, QUESTION_REPLY }
 
 data class UnknownSurfaceNode(val seq: Int, val time: Double, val type: String, val data: JsonElement?)
 

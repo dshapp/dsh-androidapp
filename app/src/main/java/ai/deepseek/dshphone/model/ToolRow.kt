@@ -16,7 +16,7 @@ import kotlinx.serialization.json.longOrNull
 
 enum class ToolRowVariant { SEARCH, READ, BASH, WRITE, EDIT, CODE, OTHERS }
 
-enum class ToolRowState { RUNNING, OK, ERROR, STOPPED }
+enum class ToolRowState { PREPARING, RUNNING, OK, ERROR, STOPPED }
 
 data class ToolRowModel(
     val variant: ToolRowVariant,
@@ -31,6 +31,7 @@ private val TOOL_VARIANTS = mapOf(
     "bash" to ToolRowVariant.BASH,
     "pwsh" to ToolRowVariant.BASH,
     "read" to ToolRowVariant.READ,
+    "read_image" to ToolRowVariant.READ,
     "web_fetch" to ToolRowVariant.READ,
     "web_search" to ToolRowVariant.SEARCH,
     "grep" to ToolRowVariant.SEARCH,
@@ -160,6 +161,11 @@ fun toolRowModel(data: ToolChatData, cwd: String?): ToolRowModel {
     val variant = classifyTool(data.name)
     val done = data.result != null
     val argsRaw = data.argsRaw
+    if (data.preparing) {
+        val preview = preparingArguments(data.name, argsRaw)
+        return ToolRowModel(variant, relativizeToCwd(preview.summary, data.cwd ?: cwd), null,
+            preview.kilobytes?.let { "$it KB" }, null, ToolRowState.PREPARING)
+    }
     val args = if (argsRaw.isEmpty()) null else parseArgsMap(argsRaw)
     var state = when {
         !done -> ToolRowState.RUNNING
@@ -171,7 +177,7 @@ fun toolRowModel(data: ToolChatData, cwd: String?): ToolRowModel {
         "todo_write" -> todoSummary(argsRaw)?.first ?: ""
         "ask_user_question" -> askSummary(data) ?: ""
         "exit_plan_mode" -> planSummary(data) ?: ""
-        else -> relativizeToCwd(deriveSummary(variant, argsRaw, args), cwd)
+        else -> relativizeToCwd(deriveSummary(variant, argsRaw, args), data.cwd ?: cwd)
     }
     val replacement = terminalDescription(data.callView) ?: searchResultTitle(data.result?.resultView)
     val summary = if (variant == ToolRowVariant.OTHERS && data.name.isNotEmpty() && data.name !in KEYED_ROW_TOOLS) {
@@ -188,8 +194,11 @@ fun toolRowModel(data: ToolChatData, cwd: String?): ToolRowModel {
     return ToolRowModel(
         variant = variant,
         summary = summary,
-        filePath = deriveFilePath(variant, args),
-        summarySuffix = if (errorSummary == null && data.name == "todo_write") todoSummary(argsRaw)?.second else null,
+        filePath = recordedToolPath(data, deriveFilePath(variant, args)),
+        summarySuffix = if (errorSummary != null) null
+            else if (data.name == "todo_write") todoSummary(argsRaw)?.second
+            else if (variant == ToolRowVariant.WRITE || variant == ToolRowVariant.EDIT) contentKilobytes(args)?.let { "$it KB" }
+            else null,
         errorSummary = errorSummary,
         state = resolvedState,
     )

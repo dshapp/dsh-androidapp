@@ -171,6 +171,7 @@ private class ScannerResources {
     }
 }
 
+@androidx.annotation.OptIn(androidx.camera.core.ExperimentalGetImage::class)
 @Composable
 private fun QrScanner(onScan: (String) -> Unit) {
     val context = LocalContext.current

@@ -418,6 +418,10 @@ suspend fun ApiClient.answerUserQuestion(sessionId: SessionId, callId: String, a
 
 // —— 目标 ——————————————————————————————————————————————————————
 
+suspend fun ApiClient.goalActivation(sessionId: SessionId): ai.deepseek.dshphone.model.GoalActivationView? =
+    call("goals/get", buildJsonObject { put("agentId", sessionId) })
+        .decodeOrNull<ai.deepseek.dshphone.model.GoalActivationView>()
+
 suspend fun ApiClient.goalCreate(sessionId: SessionId, objective: String, maxGoalRounds: Int?): GoalRef =
     call(
         "goals/create",

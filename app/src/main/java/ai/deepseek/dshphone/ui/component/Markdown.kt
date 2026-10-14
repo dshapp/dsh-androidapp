@@ -34,7 +34,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.produceState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.runtime.mutableStateOf
@@ -111,7 +111,7 @@ private class MarkdownDoc(val document: Document, val tasks: Map<ListItem, Boole
 private val taskMarker = Regex("""^\[([ xX])]\s+""")
 
 /** U+FEFF：micromark 在 preprocess 阶段会摘掉文档开头这一个字符，这里对齐同一行为。 */
-private const val BOM = '﻿'
+private const val BOM = '\uFEFF'
 
 private fun parseMarkdown(raw: String): MarkdownDoc {
     val text = if (raw.startsWith(BOM)) raw.substring(1) else raw
@@ -758,8 +758,11 @@ private fun altText(image: Image): String {
 @Composable
 private fun InlineImage(image: Image, target: ai.deepseek.dshphone.model.FileLinkTarget, scope: MarkdownScope) {
     val loader = scope.loadImage ?: return
-    val state by produceState<InlineImageState>(InlineImageState.Loading, target) {
-        value = loader(target)?.let { InlineImageState.Ready(it) } ?: InlineImageState.Failed
+    // Key the state as well as the load: a new target must not show the previous bitmap.
+    var state by remember(target, loader) { mutableStateOf<InlineImageState>(InlineImageState.Loading) }
+    LaunchedEffect(target, loader) {
+        val bitmap = loader(target)
+        state = if (bitmap != null) InlineImageState.Ready(bitmap) else InlineImageState.Failed
     }
     val alt = altText(image).ifBlank { target.path.substringAfterLast('/') }
     val open = scope.onOpenLink?.let { handler -> { handler(target) } }

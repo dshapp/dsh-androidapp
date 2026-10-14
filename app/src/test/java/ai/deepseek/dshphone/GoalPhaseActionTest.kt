@@ -16,7 +16,14 @@ class GoalPhaseActionTest {
 
     @Test
     fun activeOffersPause() {
-        assertEquals(GoalPhaseAction.PAUSE, goalPhaseAction("active"))
+        assertEquals(GoalPhaseAction.PAUSE, goalPhaseAction("active", "armed"))
+    }
+
+    @Test
+    fun activeDisarmedRequiresExplicitResume() {
+        assertEquals(GoalPhaseAction.RESUME, goalPhaseAction("active", "disarmed"))
+        assertNull(goalPhaseAction("active"))
+        assertNull(goalPhaseAction("active", "unknown"))
     }
 
     @Test

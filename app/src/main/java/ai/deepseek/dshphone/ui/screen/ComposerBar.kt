@@ -731,7 +731,7 @@ private fun GoalBar(model: PhoneModel, sessionId: SessionId, store: SessionStore
         horizontalArrangement = Arrangement.spacedBy(Dimens.stripSpacing),
     ) {
         Icon(
-            if (goal.phase == "paused") Icons.Default.PauseCircleOutline else Icons.Default.Flag,
+            if (goal.phase == "paused" || store.goalActivation == "disarmed") Icons.Default.PauseCircleOutline else Icons.Default.Flag,
             null, Modifier.size(16.dp), MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(goal.objective, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
@@ -742,7 +742,7 @@ private fun GoalBar(model: PhoneModel, sessionId: SessionId, store: SessionStore
             }
             DropdownMenu(menu, { menu = false }) {
                 // 只给主机接受的转移：blocked 上给「暂停」必然被 GOAL_INVALID_TRANSITION 拒掉。
-                goalPhaseAction(goal.phase)?.let { action ->
+                goalPhaseAction(goal.phase, store.goalActivation)?.let { action ->
                     DropdownMenuItem(
                         text = {
                             Text(

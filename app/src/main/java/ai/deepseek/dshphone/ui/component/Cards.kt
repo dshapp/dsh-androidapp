@@ -414,8 +414,8 @@ fun ToolCard(
             summary = rowModel.errorSummary ?: rowModel.summary,
             suffix = rowModel.summarySuffix,
             tint = tint,
-            running = rowModel.state == ToolRowState.RUNNING,
-            onClick = { detail = true },
+            running = rowModel.state == ToolRowState.RUNNING || rowModel.state == ToolRowState.PREPARING,
+            onClick = if (data.preparing) null else ({ detail = true }),
             findQuery = findQuery,
             findActive = findActive,
         )
@@ -430,7 +430,7 @@ fun ToolCard(
             }
         }
     }
-    if (detail) {
+    if (detail && !data.preparing) {
         val title = rowModel.summary.substringBefore('\n').ifEmpty { data.name }
         val copyText = buildList {
             if (data.argsRaw.isNotEmpty()) add(prettyJson(data.argsRaw))

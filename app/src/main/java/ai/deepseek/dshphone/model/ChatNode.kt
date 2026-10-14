@@ -86,6 +86,7 @@ data class TurnProcessSpec(
     val toolCallCount: Int,
     val subagentCount: Int,
     val inlineReasoning: Boolean,
+    val durationMs: Double? = null,
 ) {
     data class Key(val turn: Int, val answerStep: Int)
 
@@ -147,7 +148,7 @@ data class AssistantStepData(
 // 工具调用 ————————————————————————————————————————————————————
 
 @Serializable
-data class ToolError(val name: String = "", val code: String = "")
+data class ToolError(val name: String = "", val code: String = "", val reason: String? = null)
 
 data class ToolResultData(
     val seq: Int,
@@ -172,6 +173,10 @@ data class ToolChatData(
     var result: ToolResultData? = null,
     var callView: JsonElement? = null,
     var subCalls: List<ToolChatData> = emptyList(),
+    /** Execution directory at dispatch, not the session's later directory. */
+    val cwd: String? = null,
+    val preparing: Boolean = false,
+    val displaySeq: Double? = null,
 )
 
 // 工作流 ——————————————————————————————————————————————————————
@@ -309,7 +314,11 @@ data class TurnTailData(
     var closingText: String? = null,
     var messageId: MessageId? = null,
     var runMs: Double? = null,
+    var outcome: TurnOutcome? = null,
+    var endedAt: Double? = null,
 )
+
+enum class TurnOutcome { COMPLETED, STOPPED, FAILED }
 
 // 转写节点 ————————————————————————————————————————————————————
 
@@ -355,7 +364,7 @@ val ChatNode.anchorSeq: Double
         is ChatNode.Steering -> seq.toDouble()
         is ChatNode.TurnTrigger -> data.seq.toDouble()
         is ChatNode.Assistant -> step.settledSeq?.toDouble() ?: step.firstVisibleSeq ?: step.startSeq
-        is ChatNode.Tool -> data.startSeq.toDouble()
+        is ChatNode.Tool -> data.displaySeq ?: data.startSeq.toDouble()
         is ChatNode.Compaction -> data.seq.toDouble()
         is ChatNode.ModelRetry -> data.seq.toDouble()
         is ChatNode.TurnError -> data.seq.toDouble()
@@ -368,21 +377,14 @@ val ChatNode.anchorSeq: Double
     }
 
 /**
- * 这一行是不是真的有内容可画。
- *
- * 轮次页脚（复制、分叉、用量、用时、结束时刻）在 turn/start 就建好了上下文，
- * 但它描述的是「这一轮收尾时」的事实：要等 turn/end 把收尾助手消息折进来
- * （messageId 落定）才成立。在此之前它的 seq 还是 turn/start 的 seq，排在
- * 这一轮的最前面——也就是紧贴系统提示卡片（同样锚在 turn/start）下方，于是
- * 一轮刚开始就先冒出一行分叉图标加时刻。
- *
- * Mac 的 `TurnTailRow` 用 `if data.messageId != nil` 把这一行关住，
- * Web 的 `TurnTailNodeView` 在 `closing === null` 时直接返回 null；这里是
- * 同一道关。
+ * turn/start only reserves a footer context; it must not render an early branch/time row.
+ * Once turn/end settles, completed turns may report duration without a final message,
+ * and stopped/failed turns render their terminal status without successful statistics.
+ * Retain messageId as a compatibility fallback for callers constructing legacy nodes.
  */
 val ChatNode.rendersRow: Boolean
     get() = when (this) {
-        is ChatNode.TurnTail -> data.messageId != null
+        is ChatNode.TurnTail -> data.outcome != null || data.messageId != null
         else -> true
     }
 
@@ -420,7 +422,7 @@ fun toolResultText(result: ToolResultData): String {
         if (block is ContentBlock.Text) parts.add(block.text)
         else parts.add(DshJson.encodeToString(JsonElement.serializer(), encodeContentBlock(block)))
     }
-    if (parts.isEmpty()) result.error?.let { parts.add("${it.name}: ${it.code}") }
+    if (parts.isEmpty()) result.error?.let { parts.add(it.reason?.takeIf { reason -> reason.isNotEmpty() } ?: "${it.name}: ${it.code}") }
     return parts.joinToString("\n")
 }
 
@@ -432,7 +434,7 @@ fun resultFirstLine(result: ToolResultData): String {
         }
         return firstLine(DshJson.encodeToString(JsonElement.serializer(), encodeContentBlock(block)))
     }
-    result.error?.let { return "${it.name}: ${it.code}" }
+    result.error?.let { return firstLine(it.reason?.takeIf { reason -> reason.isNotEmpty() } ?: "${it.name}: ${it.code}") }
     return ""
 }
 

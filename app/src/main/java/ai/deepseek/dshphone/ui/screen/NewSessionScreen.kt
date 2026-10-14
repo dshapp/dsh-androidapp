@@ -94,8 +94,7 @@ fun NewSessionScreen(model: PhoneModel, onBack: () -> Unit, onCreated: (SessionI
                                 label = { Text(workspaceTitle, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                                 leadingIcon = { Icon(Icons.Default.Folder, null, Modifier.size(16.dp)) },
                             )
-                            // 主机关闭 Agent 模式选择时不给入口：新会话统一走部署默认模式
-                            // （对齐 Mac/iOS `agentPresetPickerEnabled` 与 web `showPicker`）。
+                            // alpha.2 removes the old mode flag; only usable preset options matter.
                             if (model.agentPresetPickerEnabled) {
                                 AssistChip(
                                     onClick = { pickingPreset = true },

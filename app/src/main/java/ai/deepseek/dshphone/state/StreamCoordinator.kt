@@ -52,6 +52,7 @@ class StreamCoordinator(
      * 只有正看着的那条会话才把失败标成已读。
      */
     private val sessionIsOnScreen: (SessionId) -> Boolean = { true },
+    private val goalStateChangedHandler: (SessionId) -> Unit = {},
 ) {
     companion object {
         private const val TAG = "StreamCoordinator"
@@ -323,6 +324,13 @@ class StreamCoordinator(
                 runActivityHandler()
                 attentionHandler(AttentionSignal.Running(sessionId, running))
             }
+            "goal/activation-changed" -> {
+                val value = args.firstOrNull() ?: return
+                val sessionId = value["sessionId"].str ?: return
+                val goal = value["goal"]
+                sessionLookup(sessionId)?.setGoalActivation(goal["id"].str, goal["revision"].int, goal["activation"].str)
+                goalStateChangedHandler(sessionId)
+            }
             "api-session/activity" -> {
                 val sessionId = args.firstOrNull().str ?: return
                 val updatedAt = args.getOrNull(1).dbl ?: return
@@ -515,6 +523,7 @@ class StreamCoordinator(
             decodeInbox(frame.value)?.let { inboxQueues[frame.sessionId] = rowsFromInbox(it) }
         }
         sessionLookup(frame.sessionId)?.applyProjection(frame)
+        if (frame.key == "goal") goalStateChangedHandler(frame.sessionId)
         listStore.updateProjection(frame.sessionId, frame.key, frame.value, frame.seq)
     }
 
@@ -542,6 +551,7 @@ class StreamCoordinator(
                     scope.launch(Dispatchers.IO) { cache.saveWindow(sessionId, window) }
                 }
                 store.applyAssistantStreamBaseline(frame.assistantStream)
+                goalStateChangedHandler(sessionId)
                 // 快照的重放会把失败位重新抬起来，所以已读要在窗口落定之后再标一次
                 //（对齐 Mac openHistoryIfNeeded 里那句 defer）。
                 if (sessionIsOnScreen(sessionId)) store.markErrorSeen()
@@ -617,6 +627,7 @@ class StreamCoordinator(
                 scope.launch {
                     try {
                         store.completeGapRepair(gapRepairLoader(address, store.repairCursor), generation)
+                        goalStateChangedHandler(sessionId)
                     } catch (e: Exception) {
                         Log.w(TAG, "gap repair failed: ${e.message}")
                         store.failGapRepair(generation)
@@ -625,6 +636,7 @@ class StreamCoordinator(
             }
         } else {
             store.apply(event, entry.view)
+            if (event.type.startsWith("goal/")) goalStateChangedHandler(sessionId)
             // 失败算不算"已经看见"，只取决于用户是不是正看着这条会话。
             //
             // Mac 在 fold 之前就把不在屏的整帧丢掉了（foldsLiveEvents），于是那里的

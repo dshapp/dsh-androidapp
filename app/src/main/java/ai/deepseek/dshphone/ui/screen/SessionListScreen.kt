@@ -79,6 +79,8 @@ fun SessionListScreen(
     onOpenSettings: () -> Unit,
     onNewSession: () -> Unit,
     onOpenArchived: () -> Unit,
+    onOpenPlugins: () -> Unit = {},
+    onOpenAutomations: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -323,6 +325,9 @@ fun SessionListScreen(
                             Icon(Icons.Default.FilterList, Strings.viewOptions)
                         }
                         DropdownMenu(viewMenu, { viewMenu = false }) {
+                            DropdownMenuItem(text = { Text(if (Strings.locale == ai.deepseek.dshphone.i18n.AppLocale.ZH) "插件管理" else "Plugins") }, onClick = { viewMenu = false; onOpenPlugins() })
+                            DropdownMenuItem(text = { Text(if (Strings.locale == ai.deepseek.dshphone.i18n.AppLocale.ZH) "自动化任务" else "Automations") }, onClick = { viewMenu = false; onOpenAutomations() })
+                            HorizontalDivider()
                             MenuSectionLabel(Strings.groupBy)
                             ChoiceItem(Strings.groupByWorkspace, Icons.Default.Folder, groupBy == "workspace") {
                                 groupBy = "workspace"; persistView(); viewMenu = false

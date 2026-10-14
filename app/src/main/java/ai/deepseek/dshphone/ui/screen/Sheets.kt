@@ -171,6 +171,41 @@ fun ModelPickerSheet(model: PhoneModel, sessionId: SessionId, onDismiss: () -> U
     }
 }
 
+/** Provider catalog configuration is separate from the session llm/select picker above. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ProviderCatalogSettingsSheet(store: HostSettingsStore, onSave: () -> Unit) {
+    val draft = store.draft ?: return
+    val writable = store.catalogWritable
+    ModalBottomSheet(onDismissRequest = { store.cancelCatalog() }) {
+        Column(Modifier.fillMaxWidth().heightIn(max = 640.dp).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(draft.entry.displayName.ifBlank { draft.entry.provider }, style = MaterialTheme.typography.titleMedium)
+            Text(settingsLabel("Models · expected revision ", "模型目录 · 原始版本 ")+draft.expectedRevision, style = MaterialTheme.typography.bodySmall)
+            Text(if (draft.owned) settingsLabel("User override", "用户覆盖") else settingsLabel("Inherited models · reset only unsets the user override", "继承模型 · 恢复仅移除用户覆盖"), style = MaterialTheme.typography.bodySmall)
+            if (!writable) Text(settingsLabel("Read-only / saving / provider unavailable", "只读、保存中或 provider 已不可用"), style = MaterialTheme.typography.bodySmall)
+            draft.rows.forEachIndexed { index, row ->
+                key(index) {
+                    OutlinedTextField(row.id, { text -> store.editCatalog(index) { it.copy(id = text) } }, label = { Text(settingsLabel("Model id", "模型 ID")) }, enabled = writable, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    val fields = settingsSchemaNodeAt(draft.openedNamespace.schema, draft.path + "0")?.get("dict").obj.orEmpty()
+                    if ("name" in fields) OutlinedTextField(row.name, { text -> store.editCatalog(index) { it.copy(name = text) } }, label = { Text(settingsLabel("Name", "名称")) }, enabled = writable, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    if ("contextWindow" in fields) OutlinedTextField(row.contextWindow, { text -> store.editCatalog(index) { it.copy(contextWindow = text) } }, label = { Text(settingsLabel("Context window (tokens)", "上下文容量（tokens）")) }, enabled = writable, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    if ("maxTokens" in fields) OutlinedTextField(row.maxTokens, { text -> store.editCatalog(index) { it.copy(maxTokens = text) } }, label = { Text(settingsLabel("Max tokens", "最大输出 tokens")) }, enabled = writable, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    TextButton(onClick = { store.removeCatalogModel(index) }, enabled = writable) { Text(settingsLabel("Remove model", "移除模型")) }
+                    HorizontalDivider()
+                }
+            }
+            TextButton(onClick = { store.addCatalogModel() }, enabled = writable) { Text(settingsLabel("Add model", "添加模型")) }
+            TextButton(onClick = { store.resetCatalogModels() }, enabled = writable && draft.owned) { Text(settingsLabel("Reset to inherited models", "恢复继承模型")) }
+            (store.saveError ?: draft.validationError())?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = { store.cancelCatalog() }, enabled = !store.saving) { Text(Strings.cancel) }
+                Button(onClick = onSave, enabled = writable && draft.touched && draft.validationError() == null) { Text(if (store.saving) settingsLabel("Saving…", "保存中…") else settingsLabel("Save", "保存")) }
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
 // —— 上下文明细 ————————————————————————————————————————————
 
 /** contextBreakdown 投影的三段启发式读数（与 Mac ContextBreakdownReading 同构）。 */
@@ -514,7 +549,7 @@ fun SessionPanelSheet(
                 SectionTitle(Strings.subagents)
                 subagents.forEach { entry ->
                     ListItem(
-                        modifier = Modifier.clickable {
+                        modifier = Modifier.clickable(enabled = entry.canOpenLocally) {
                             scope.launch {
                                 model.openSubagent(sessionId, entry)?.let {
                                     onDismiss()
@@ -528,7 +563,8 @@ fun SessionPanelSheet(
                         },
                         trailingContent = {
                             if (model.subagentRunning(entry.id)) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                            else Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null)
+                            else if (entry.canOpenLocally) Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null)
+                            else Text("external", style = MaterialTheme.typography.labelSmall)
                         },
                     )
                 }

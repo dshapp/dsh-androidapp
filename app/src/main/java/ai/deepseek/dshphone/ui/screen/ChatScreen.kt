@@ -247,7 +247,7 @@ fun ChatScreen(
 
     val summary = model.listStore.sessionsById[sessionId]
     val title = summary?.let { sessionDisplayTitle(it, store?.title) } ?: Strings.sessionUntitled
-    val cwd = summary?.cwd
+    val cwd = store?.currentDirectory ?: summary?.cwd
 
     Scaffold(
         topBar = {

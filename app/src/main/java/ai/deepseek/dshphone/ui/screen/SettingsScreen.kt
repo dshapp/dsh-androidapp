@@ -5,6 +5,14 @@ import ai.deepseek.dshphone.i18n.Strings
 import ai.deepseek.dshphone.state.AppThemeMode
 import ai.deepseek.dshphone.state.PhoneModel
 import ai.deepseek.dshphone.state.ServerProfile
+import ai.deepseek.dshphone.model.agentPresetDisplayText
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.ui.text.font.FontFamily
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.awaitCancellation
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -26,6 +34,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
+internal fun settingsLabel(en: String, zh: String): String = if (Strings.locale == AppLocale.EN) en else zh
+
 /**
  * 设置页：列表页左上角状态点的落点。
  *
@@ -45,6 +55,21 @@ fun SettingsScreen(
     var nameDraft by remember { mutableStateOf("") }
     var languageMenu by remember { mutableStateOf(false) }
     var themeMenu by remember { mutableStateOf(false) }
+    val hostSettings = model.hostSettings
+    val scope = rememberCoroutineScope()
+    val owner = LocalLifecycleOwner.current
+    DisposableEffect(hostSettings, owner) {
+        onDispose { hostSettings.suspendReads() }
+    }
+    LaunchedEffect(hostSettings, owner, model.profiles.currentId) {
+        owner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            hostSettings.visible = true
+            try {
+                model.refreshHostSettings()
+                awaitCancellation()
+            } finally { hostSettings.suspendReads() }
+        }
+    }
 
     // 最后一台机器被移除后这页没有内容可展示了，退回根部由引导页接手。
     val empty = model.profiles.profiles.isEmpty()
@@ -130,6 +155,43 @@ fun SettingsScreen(
                 )
             }
 
+            SectionTitle(settingsLabel("DSH · Models & credentials", "DSH · 模型与凭证"))
+            TextButton(onClick = { scope.launch { model.refreshHostSettings() } }, enabled = !hostSettings.loading) {
+                Text(if (hostSettings.loading) settingsLabel("Loading…", "加载中…") else settingsLabel("Refresh", "刷新"))
+            }
+            hostSettings.error?.let { Text(it, Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error) }
+            hostSettings.credentialError?.let { Text(it, Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error) }
+            if (!hostSettings.writable) Text(settingsLabel("Host settings are read-only / unavailable", "宿主设置只读或暂不可用"), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall)
+            hostSettings.rows.forEach { row ->
+                ListItem(
+                    headlineContent = { Text(row.entry.displayName.ifBlank { row.entry.provider }) },
+                    supportingContent = {
+                        Column {
+                            row.entry.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                            Text(row.credentialRef?.let { ref ->
+                                val state = row.credential?.let { if (it.configured) settingsLabel("configured", "已配置") else settingsLabel("not configured", "未配置") } ?: settingsLabel("unknown", "未知")
+                                val source = row.credential?.source?.let { " · $it" }.orEmpty()
+                                val ownership = if (row.derivedRef) settingsLabel("derived ref; not named by provider", "推导引用；provider 未采用此引用") else settingsLabel("provider ref", "provider 指定引用")
+                                "$ref · $state$source · $ownership · "+settingsLabel("read-only", "只读")
+                            } ?: settingsLabel("Account / provider-managed authentication", "账号或 provider 自有认证"), style = MaterialTheme.typography.bodySmall)
+                            if (!row.catalogSupported) Text(settingsLabel("Catalog schema unsupported or secret-redacted; no edits", "目录 schema 不支持或含脱敏密钥；禁止编辑"), style = MaterialTheme.typography.bodySmall)
+                        }
+                    },
+                    trailingContent = {
+                        if (row.catalogSupported) TextButton(onClick = { hostSettings.beginCatalog(row) }, enabled = !hostSettings.saving) { Text(settingsLabel("Models", "模型目录")) }
+                    },
+                )
+            }
+            hostSettings.saveError?.takeIf { hostSettings.draft == null }?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
+            SectionTitle(settingsLabel("Agent preset · YAML (read-only)", "Agent 预设 · YAML（只读）"))
+            model.agentPresets.forEach { preset ->
+                ListItem(
+                    headlineContent = { Text(agentPresetDisplayText(preset).name) },
+                    supportingContent = { preset.broken?.let { Text(it, color = MaterialTheme.colorScheme.error) } },
+                    trailingContent = { TextButton(onClick = { scope.launch { model.readAgentPresetYaml(preset.id) } }) { Text("YAML") } },
+                )
+            }
+
             // 外观区：语言与主题都是本机偏好，选中即刻生效并落盘，不必重启 App。
             SectionTitle(Strings.appearance)
             Box {
@@ -169,6 +231,23 @@ fun SettingsScreen(
         }
     }
 
+    if (hostSettings.draft != null) {
+        ProviderCatalogSettingsSheet(hostSettings, onSave = { scope.launch { model.saveHostSettingsDraft() } })
+    }
+    hostSettings.presetId?.let { id ->
+        AlertDialog(
+            onDismissRequest = { hostSettings.closePreset() },
+            title = { Text("$id · "+settingsLabel("YAML (read-only)", "YAML（只读）")) },
+            text = {
+                Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState())) {
+                    val document = hostSettings.presetDocument
+                    if (document != null) SelectionContainer { Text(document.content, fontFamily = FontFamily.Monospace) }
+                    else Text(hostSettings.presetError ?: settingsLabel("Loading…", "加载中…"))
+                }
+            },
+            confirmButton = { TextButton(onClick = { hostSettings.closePreset() }) { Text(settingsLabel("Close", "关闭")) } },
+        )
+    }
     removing?.let { profile ->
         AlertDialog(
             onDismissRequest = { removing = null },

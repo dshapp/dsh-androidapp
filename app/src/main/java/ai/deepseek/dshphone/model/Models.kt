@@ -320,8 +320,6 @@ val AGENT_PRESET_BUILT_IN_IDS = setOf("standard", "ptc", "minimal", "cordis")
 @Serializable
 data class AgentPresetListValue(
     val presets: List<AgentPresetEntry> = emptyList(),
-    /** 主机是否允许新会话选择 Agent 模式（与 Mac `AgentPresetListValue.modeSelectionEnabled` 同一口径）。 */
-    val modeSelectionEnabled: Boolean = true,
 )
 
 // 命令与 skills ————————————————————————————————————————————————
@@ -443,12 +441,17 @@ data class JobTermination(val exitCode: Int?, val signal: String?, val remainder
 enum class SubagentMode {
     @SerialName("one-shot") ONE_SHOT,
     @SerialName("continuable") CONTINUABLE,
+    /** External execution has no local child Session or transcript. */
+    @SerialName("external") EXTERNAL,
     /** 0.1.7 起目录里也会留下模式不明的子会话：只能浏览，不能继续发消息。 */
     @SerialName("unknown") UNKNOWN;
+
+    val isLocalSession: Boolean get() = this != EXTERNAL
 
     val wire: String get() = when (this) {
         ONE_SHOT -> "one-shot"
         CONTINUABLE -> "continuable"
+        EXTERNAL -> "external"
         UNKNOWN -> "unknown"
     }
 }
@@ -469,7 +472,9 @@ data class SubagentCatalogEntry(
     val createdAt: Double = 0.0,
     val mode: SubagentMode = SubagentMode.UNKNOWN,
     val label: String? = null,
-)
+) {
+    val canOpenLocally: Boolean get() = mode.isLocalSession
+}
 
 // 会话地址 ————————————————————————————————————————————————————
 

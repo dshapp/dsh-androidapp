@@ -12,6 +12,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import kotlinx.serialization.json.JsonElement
+import ai.deepseek.dshphone.model.*
+import ai.deepseek.dshphone.net.ApiClient
+import ai.deepseek.dshphone.net.describeHostSettings
+import ai.deepseek.dshphone.net.listConfigurableProviders
+import ai.deepseek.dshphone.net.describeCredentialRefs
+import ai.deepseek.dshphone.net.readAgentPresetDocument
+import ai.deepseek.dshphone.net.mutateHostSettings
+import kotlinx.coroutines.CancellationException
 
 /** 会话列表：主机推来的会话清单加上本机侧的置顶/草稿/待办标记。 */
 class SessionListStore(private val prefs: SharedPreferences?) {
@@ -414,6 +422,142 @@ class SessionListStore(private val prefs: SharedPreferences?) {
         private const val MANUAL_KEY = "flat_session_order"
         /** 落盘的"上次还在跑"的会话集合，用于进程重启后的完成补发。 */
         private const val RUNNING_KEY = "running_session_ids"
+    }
+}
+
+/** Host facts and editor state have separate lifetimes: broadcast refresh never rebases a draft. */
+class HostSettingsStore {
+    var visible by mutableStateOf(false)
+    var loading by mutableStateOf(false)
+        private set
+    var writable by mutableStateOf(false)
+        private set
+    var rows by mutableStateOf<List<ProviderSettingsRow>>(emptyList())
+        private set
+    var error by mutableStateOf<String?>(null)
+        private set
+    var credentialError by mutableStateOf<String?>(null)
+        private set
+    var draft by mutableStateOf<ProviderCatalogDraft?>(null)
+        private set
+    var saving by mutableStateOf(false)
+        private set
+    var saveError by mutableStateOf<String?>(null)
+        private set
+    var presetId by mutableStateOf<String?>(null)
+        private set
+    var presetDocument by mutableStateOf<AgentPresetDocument?>(null)
+        private set
+    var presetError by mutableStateOf<String?>(null)
+        private set
+    private var generation = 0L
+    private var loadToken = 0L
+    private var presetToken = 0L
+
+    /** Call when switching/disconnecting hosts; low revisions belong to the new generation. */
+    fun reset() {
+        generation++; loadToken++; presetToken++
+        loading = false; writable = false; rows = emptyList(); error = null; credentialError = null
+        draft = null; saving = false; saveError = null; closePreset()
+    }
+
+    /** Pause/navigation invalidates pending reads without discarding a provider draft. */
+    fun suspendReads() {
+        visible = false; loadToken++; loading = false; closePreset()
+    }
+
+    /** Exposed separately for deterministic offline fact-refresh regression tests. */
+    fun applyFacts(settings: SettingsDescribeValue, providers: List<ConfigurableProviderView>, credentials: Map<String, CredentialInfo>) {
+        writable = settings.writable
+        val namespaces = settings.namespaces.associateBy { it.ns }
+        rows = providers.map { entry ->
+            val row = ProviderSettingsRow(entry, namespaces[entry.settingsNs])
+            row.copy(credential = row.credentialRef?.let { credentials[it] })
+        }
+        // draft.openedNamespace and expectedRevision intentionally stay unchanged.
+    }
+
+    suspend fun refresh(api: ApiClient) {
+        val host = generation
+        val token = ++loadToken
+        loading = true
+        try {
+            val settings = api.describeHostSettings()
+            val providers = api.listConfigurableProviders()
+            val namespaces = settings.namespaces.associateBy { it.ns }
+            val refs = providers.mapNotNull { ProviderSettingsRow(it, namespaces[it.settingsNs]).credentialRef }.distinct().sorted()
+            var keyError: String? = null
+            val credentials = try { if (refs.isEmpty()) emptyMap() else api.describeCredentialRefs(refs) }
+            catch (e: CancellationException) { throw e }
+            catch (e: Exception) { keyError = e.message ?: "Credential facts unavailable"; emptyMap() }
+            if (host != generation || token != loadToken) return
+            applyFacts(settings, providers, credentials)
+            error = null; credentialError = keyError
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) {
+            if (host == generation && token == loadToken) {
+                error = e.message ?: "Settings unavailable"
+                writable = false // stale facts must never authorize writes after a failed refresh
+            }
+        } finally { if (host == generation && token == loadToken) loading = false }
+    }
+
+    fun beginCatalog(row: ProviderSettingsRow) {
+        if (saving || !row.catalogSupported) return
+        saveError = null
+        try { draft = ProviderCatalogDraft.open(row) }
+        catch (e: Exception) { saveError = e.message }
+    }
+    val catalogWritable: Boolean get() {
+        val current = draft ?: return false
+        return writable && rows.any { it.entry == current.entry && it.catalogSupported } && !saving
+    }
+    fun editCatalog(index: Int, update: (CatalogModelDraft) -> CatalogModelDraft) {
+        if (!catalogWritable) return
+        val current = draft ?: return
+        draft = current.copy(rows = current.rows.mapIndexed { i, row -> if (i == index) update(row) else row }, owned = true, touched = true)
+        saveError = null
+    }
+    fun addCatalogModel() {
+        if (!catalogWritable) return
+        draft = draft?.let { it.copy(rows = it.rows + CatalogModelDraft(kotlinx.serialization.json.JsonObject(emptyMap())), owned = true, touched = true) }
+    }
+    fun removeCatalogModel(index: Int) {
+        if (!catalogWritable) return
+        draft = draft?.let { it.copy(rows = it.rows.filterIndexed { i, _ -> i != index }, owned = true, touched = true) }
+    }
+    fun resetCatalogModels() { if (catalogWritable) { draft = draft?.reset(); saveError = null } }
+    fun cancelCatalog() { if (!saving) { draft = null; saveError = null } }
+
+    suspend fun saveCatalog(api: ApiClient) {
+        if (!visible || !catalogWritable) return
+        val opened = draft ?: return
+        val host = generation
+        try {
+            val mutation = opened.mutation() ?: run { draft = null; return }
+            saving = true; saveError = null
+            api.mutateHostSettings(mutation)
+            if (host != generation) return
+            if (draft === opened) draft = null
+            refresh(api)
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) {
+            if (host == generation) saveError = e.message ?: "Save failed; draft retained"
+            // Conflict is deliberately not retried or rebased onto fresh facts.
+        } finally { if (host == generation) saving = false }
+    }
+
+    fun closePreset() { presetToken++; presetId = null; presetDocument = null; presetError = null }
+    suspend fun readPreset(api: ApiClient, id: String) {
+        val host = generation
+        val token = ++presetToken
+        presetId = id; presetDocument = null; presetError = null
+        try {
+            val document = api.readAgentPresetDocument(id)
+            require(document.agentPreset == id) { "Preset response identity mismatch" }
+            if (host == generation && token == presetToken && presetId == id) presetDocument = document
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) { if (host == generation && token == presetToken) presetError = e.message ?: "Preset YAML unavailable" }
     }
 }
 

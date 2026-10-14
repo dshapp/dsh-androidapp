@@ -11,6 +11,10 @@ import ai.deepseek.dshphone.ui.screen.NewSessionScreen
 import ai.deepseek.dshphone.ui.screen.OnboardingScreen
 import ai.deepseek.dshphone.ui.screen.PairingScreen
 import ai.deepseek.dshphone.ui.screen.SettingsScreen
+import ai.deepseek.dshphone.ui.screen.PluginManagerScreen
+import ai.deepseek.dshphone.ui.screen.AutomationsScreen
+import ai.deepseek.dshphone.state.PluginManagementState
+import ai.deepseek.dshphone.state.AutomationManagementState
 import ai.deepseek.dshphone.ui.screen.SessionListScreen
 import ai.deepseek.dshphone.i18n.Strings
 import androidx.compose.foundation.layout.Box
@@ -34,6 +38,9 @@ import androidx.navigation.compose.rememberNavController
 @Composable
 fun DshApp(model: PhoneModel, launch: LaunchRequest?, onLaunchHandled: () -> Unit = {}) {
     val navController = rememberNavController()
+    val api = model.managementApi
+    val pluginState = remember(api) { PluginManagementState() }
+    val automationState = remember(api) { AutomationManagementState() }
     var scanning by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { model.connectCurrent() }
@@ -85,8 +92,18 @@ fun DshApp(model: PhoneModel, launch: LaunchRequest?, onLaunchHandled: () -> Uni
                         onOpenSettings = { navController.navigate("settings") },
                         onNewSession = { navController.navigate("new") },
                         onOpenArchived = { navController.navigate("archived") },
+                        onOpenPlugins = { navController.navigate("plugins") },
+                        onOpenAutomations = { navController.navigate("automations") },
                     )
                 }
+            }
+            composable("plugins") {
+                if (api != null) PluginManagerScreen(api = api, onBack = { navController.popBackStack() }, state = pluginState)
+                else Text(Strings.connect)
+            }
+            composable("automations") {
+                if (api != null) AutomationsScreen(api = api, onBack = { navController.popBackStack() }, state = automationState)
+                else Text(Strings.connect)
             }
             composable("archived") {
                 ArchivedSessionsScreen(

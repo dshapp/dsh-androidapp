@@ -149,6 +149,14 @@ class PhoneModel private constructor(app: Application) {
 
     /** 本机外观偏好（语言、主题）；设置页读写，MainActivity 在组合前先按它定主题。 */
     val settings = SettingsStore(appContext)
+    val hostSettings = HostSettingsStore()
+
+    suspend fun refreshHostSettings() { api?.let { hostSettings.refresh(it) } }
+    suspend fun readAgentPresetYaml(id: String) { api?.let { hostSettings.readPreset(it, id) } }
+    suspend fun saveHostSettingsDraft() { api?.let { hostSettings.saveCatalog(it) } }
+
+    /** Read-only connection handle for native management screens. */
+    val managementApi: ApiClient? get() = api
 
     val listStore = SessionListStore(prefs)
     /** 每轮改动文件的汇总与比较（0.1.6 的 ui-deliverables 路由）。 */
@@ -191,13 +199,7 @@ class PhoneModel private constructor(app: Application) {
     var lastErrorMessage by mutableStateOf<String?>(null)
     var agentPresets by mutableStateOf<List<AgentPresetEntry>>(emptyList())
         private set
-    /**
-     * 主机是否允许新会话选择 Agent 模式（`agentPresets/list` 的 `modeSelectionEnabled`）。
-     *
-     * 关掉时新会话统一走部署默认模式：Web 收起选择器并清掉暂存的选择，Mac/iOS 的
-     * `agentPresetPickerEnabled` 也不给入口。主机侧 `agentPresets/select` 并不校验这个
-     * 策略，所以摆出选择器不只是多一个入口，而是真的能把预设选上去、绕过部署的默认边界。
-     */
+    /** alpha.2 no longer has a deployment mode gate; show the picker when usable presets exist. */
     var agentPresetPickerEnabled by mutableStateOf(true)
         private set
     /** 进程级权限目录（0.1.6）；0.1.5 主机上始终是空的，各 store 退回投影内联的候选。 */
@@ -227,7 +229,7 @@ class PhoneModel private constructor(app: Application) {
      */
     var archiveNeedsStop by mutableStateOf<SessionId?>(null)
 
-    private var api: ApiClient? = null
+    private var api by mutableStateOf<ApiClient?>(null)
     private var coordinator: StreamCoordinator? = null
     /// 已经建立连接的配置；用来让重复的 connectCurrent 变成空操作。
     private var connectedProfileId: String? = null
@@ -333,6 +335,7 @@ class PhoneModel private constructor(app: Application) {
                 // appIsActive && visibleSessionId 的判据不同：这里问的是"读没读过"，
                 // 后台失败仍然要留红点，所以不看 appIsActive）。
                 sessionIsOnScreen = { visibleSessionId == it },
+                goalStateChangedHandler = { id -> scope.launch { refreshGoalActivation(id) } },
             )
             streamCoordinator.onConnectionState = { socketState = it }
             coordinator = streamCoordinator
@@ -403,6 +406,10 @@ class PhoneModel private constructor(app: Application) {
             if (event == "llm/adapters-updated" || event == "settings/document-updated") {
                 sessions.keys.toList().forEach { loadModels(it) }
             }
+            if (event == "goal/activation-changed" || event == "goal/state-changed") {
+                sessions.keys.toList().forEach { refreshGoalActivation(it) }
+            }
+            if (hostSettings.visible && event in setOf("settings/updated", "settings/document-updated", "credentials/updated", "credentials/reference-updated")) refreshHostSettings()
             if (event == "connection/reset") refreshInternal()
         }
     }
@@ -442,7 +449,10 @@ class PhoneModel private constructor(app: Application) {
     }
 
     private suspend fun resyncAfterReconnect() {
+        if (hostSettings.visible) refreshHostSettings()
+        sessions.values.forEach { it.setGoalActivation(null, null, null) }
         refreshInternal()
+        sessions.keys.toList().forEach { refreshGoalActivation(it) }
         val sessionId = selectedSessionId ?: return
         val store = sessions[sessionId] ?: return
         // 重连后每条已注册的流都会重开，follow 的 snapshot 帧会重新送来完整基线；
@@ -456,6 +466,7 @@ class PhoneModel private constructor(app: Application) {
         coordinator = null
         api?.invalidate()
         api = null
+        hostSettings.reset()
         connectedProfileId = null
         sessions.clear()
         selectedSessionId = null
@@ -526,7 +537,8 @@ class PhoneModel private constructor(app: Application) {
             // 只有 follow 覆盖不到的才补分页：已经有实时事件、却还没有基线的 store（通知唤起
             // 的那种，historyCursor 已经有权威值）。随后的 loadHistory 见没有权威游标会直接
             // 跳过，转写保持加载态等 snapshot，多发一次也是空操作。
-            val following = coordinator?.follow(sessionId, maxMessages = INITIAL_HISTORY_MESSAGES) == true
+            launch { refreshGoalActivation(sessionId) }
+            val following = coordinator?.follow(sessionId, store.followAddress, INITIAL_HISTORY_MESSAGES) == true
             if (following) return@launch
             if (!store.historyLoaded) loadHistory(store)
         }
@@ -534,6 +546,7 @@ class PhoneModel private constructor(app: Application) {
 
     suspend fun loadHistory(store: SessionStore) {
         val client = api ?: return
+        if (store.subagentAddress?.mode == SubagentMode.EXTERNAL) return
         // 没有权威游标就不发 session/page：throughSeq 只能填一个假的 0，
         // 主机会当成"截止到第 0 条事件"回一页非消息事件，反而把转写打成空态。
         val throughSeq = store.historyCursor
@@ -541,14 +554,14 @@ class PhoneModel private constructor(app: Application) {
         store.loadingHistory = true
         val loadingOlder = store.historyLoaded
         try {
-            val value = client.sessionHistory(
-                store.sessionId,
+            val page = client.sessionPage(
+                store.followAddress,
                 throughSeq,
                 if (loadingOlder) store.firstSeq else null,
                 // 首屏窄、往上翻宽：见 INITIAL_HISTORY_MESSAGES 的说明。
                 if (loadingOlder) HISTORY_MESSAGES else INITIAL_HISTORY_MESSAGES,
             )
-            store.loadHistory(value, replacing = !loadingOlder)
+            store.loadHistory(SessionHistoryValue(page.records, page.hasMore, null), replacing = !loadingOlder)
             store.historyError = null
         } catch (e: CancellationException) {
             throw e
@@ -1099,6 +1112,7 @@ class PhoneModel private constructor(app: Application) {
         sessions[childSessionId]?.running ?: listStore.sessionsById[childSessionId]?.running ?: false
 
     suspend fun openSubagent(parentSessionId: SessionId, entry: SubagentCatalogEntry): SessionId? {
+        if (!entry.canOpenLocally) return null
         val childSessionId = entry.id
         val address = SubagentAddress(parentSessionId, childSessionId, entry.mode)
         val store = store(childSessionId)
@@ -1108,6 +1122,7 @@ class PhoneModel private constructor(app: Application) {
         entry.label?.let { store.title = it }
         store.running = subagentRunning(childSessionId)
         selectedSessionId = childSessionId
+        scope.launch { refreshGoalActivation(childSessionId) }
         // 与 open() 同一条规矩：首屏只拉一份，follow 建不起来时才补分页。
         val following = coordinator?.follow(
             childSessionId,
@@ -1123,7 +1138,7 @@ class PhoneModel private constructor(app: Application) {
         val store = sessions[sessionId] ?: return false
         val address = store.subagentAddress ?: return false
         val trimmed = text.trim()
-        if (trimmed.isEmpty()) return false
+        if (address.mode != SubagentMode.CONTINUABLE || trimmed.isEmpty()) return false
         return try {
             client.subagentPrompt(address, trimmed, TimeZone.getDefault().id)
             store.running = true
@@ -1176,6 +1191,18 @@ class PhoneModel private constructor(app: Application) {
 
     // —— 目标 ——————————————————————————————————————————————————
 
+    suspend fun refreshGoalActivation(sessionId: SessionId) {
+        val client = api ?: return
+        val store = sessions[sessionId] ?: return
+        val epoch = store.goalActivationEpoch
+        try {
+            val value = client.goalActivation(sessionId)
+            if (api !== client || sessions[sessionId] !== store || epoch != store.goalActivationEpoch) return
+            store.setGoalActivation(value?.id, value?.revision, value?.activation)
+        } catch (e: CancellationException) { throw e }
+        catch (_: Exception) { /* Older hosts have no goals/get: do not guess activation. */ }
+    }
+
     fun createGoal(objective: String, maxGoalRounds: Int?, sessionId: SessionId) {
         scope.launch {
             try { api?.goalCreate(sessionId, objective, maxGoalRounds) }
@@ -1200,11 +1227,12 @@ class PhoneModel private constructor(app: Application) {
             try {
                 // 与 GoalBar 同一张映射表：blocked/complete 上的暂停/恢复主机不接受，直接不发，
                 // 免得弹一句用户没法处理的 GOAL_INVALID_TRANSITION。
-                when (goalPhaseAction(goal.phase)) {
+                when (goalPhaseAction(goal.phase, store.goalActivation)) {
                     GoalPhaseAction.PAUSE -> api?.goalPause(sessionId, ref)
                     GoalPhaseAction.RESUME -> api?.goalResume(sessionId, ref)
                     null -> Unit
                 }
+                refreshGoalActivation(sessionId)
             } catch (e: Exception) { lastErrorMessage = describe(e) }
         }
     }

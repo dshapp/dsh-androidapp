@@ -12,8 +12,8 @@ enum class GoalPhaseAction { PAUSE, RESUME }
  * GoalBarContent 同样只画 active→pause、paused→resume。所以 blocked 两个都不给——
  * 对它发 pause 必被主机回 GOAL_INVALID_TRANSITION，那个按钮点了只会报错，永远不成。
  */
-fun goalPhaseAction(phase: String): GoalPhaseAction? = when (phase) {
-    "active" -> GoalPhaseAction.PAUSE
-    "paused" -> GoalPhaseAction.RESUME
-    else -> null
+fun goalPhaseAction(phase: String, activation: String? = null): GoalPhaseAction? = when {
+    phase == "paused" || (phase == "active" && activation == "disarmed") -> GoalPhaseAction.RESUME
+    phase == "active" && activation == "armed" -> GoalPhaseAction.PAUSE
+    else -> null // Unknown activation must not guess or silently rearm a goal.
 }

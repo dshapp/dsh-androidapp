@@ -473,6 +473,7 @@ private fun TurnProcessRow(spec: TurnProcessSpec, store: SessionStore?) {
     CardRow(
         if (expanded) Icons.Default.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
         summary,
+        suffix = spec.durationMs?.let(::formatDuration),
         onClick = { store?.setTurnProcessExpanded(spec, !expanded) },
     )
 }
@@ -486,6 +487,14 @@ private fun TurnTailRow(
     model: PhoneModel,
     store: SessionStore?,
 ) {
+    if (data.outcome == TurnOutcome.FAILED || data.outcome == TurnOutcome.STOPPED) {
+        NoticeRow(
+            if (data.outcome == TurnOutcome.FAILED) Icons.Default.Warning else Icons.Default.PauseCircle,
+            if (data.outcome == TurnOutcome.FAILED) Strings.workflowStatusFailed else Strings.workflowStatusInterrupted,
+            if (data.outcome == TurnOutcome.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        return
+    }
     val clipboard = LocalClipboardManager.current
     var copied by remember { mutableStateOf(false) }
     var usageOpen by remember { mutableStateOf(false) }
@@ -530,7 +539,7 @@ private fun TurnTailRow(
             StatPill(Icons.Default.Schedule, formatDuration(runMs)) { timeOpen = true }
         }
         Text(
-            clockTime(data.time),
+            clockTime(data.endedAt ?: data.time),
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.outline,
             modifier = Modifier.padding(start = 4.dp),

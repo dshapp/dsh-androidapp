@@ -100,6 +100,10 @@ class SessionStore(val sessionId: SessionId) {
     var blank by mutableStateOf(true)
     var title by mutableStateOf("")
     var cwd by mutableStateOf<String?>(null)
+    var workingDirectory by mutableStateOf<String?>(null)
+        private set
+    val currentDirectory: String? get() = workingDirectory ?: cwd
+    private var workingDirectorySeq = -1
     var agentPreset by mutableStateOf<String?>(null)
 
     var pendingApproval by mutableStateOf<ApprovalRequested?>(null)
@@ -147,6 +151,32 @@ class SessionStore(val sessionId: SessionId) {
         private set
     var goal by mutableStateOf<GoalProjection?>(null)
         private set
+    var goalActivation by mutableStateOf<String?>(null)
+        private set
+    var goalActivationEpoch by mutableStateOf(0)
+        private set
+    private var goalActivationId: String? = null
+    private var goalActivationRevision: Int? = null
+
+    fun setGoalActivation(id: String?, revision: Int?, activation: String?) {
+        if (id == null && revision == null && activation == null) {
+            goalActivationEpoch++
+            goalActivation = null
+            goalActivationId = goal?.id
+            goalActivationRevision = goal?.revision
+        } else if (id != null && revision != null && id == goal?.id && revision == goal?.revision) {
+            goalActivationEpoch++
+            goalActivationId = id
+            goalActivationRevision = revision
+            goalActivation = activation?.takeIf { it == "armed" || it == "disarmed" }
+        }
+    }
+
+    private fun invalidateGoalActivation() {
+        if (goalActivationId != goal?.id || goalActivationRevision != goal?.revision) {
+            setGoalActivation(null, null, null)
+        }
+    }
     var tokenUsage by mutableStateOf<TokenUsage?>(null)
         private set
     var sessionStats by mutableStateOf<SessionStatsProjection?>(null)
@@ -515,6 +545,8 @@ class SessionStore(val sessionId: SessionId) {
     private fun replayHistory() {
         contexts.clear()
         referencedSessions = emptyMap()
+        workingDirectory = projections["workingDirectory"]?.first?.str
+        workingDirectorySeq = projections["workingDirectory"]?.second ?: -1
         durableCursor = -1
         transientInGap = 0
         presentedByTurn.clear()
@@ -569,6 +601,10 @@ class SessionStore(val sessionId: SessionId) {
             "tool-workflow/run-start", "tool-workflow/agent-start",
             "tool-workflow/agent-end", "tool-workflow/run-end" -> applyWorkflow(event)
             "session/title" -> event.data["title"].str?.let { title = it }
+            "working-directory/change" -> if (event.seq >= workingDirectorySeq) {
+                workingDirectory = event.data["cwd"].str
+                workingDirectorySeq = event.seq
+            }
             "deliverables/presented" -> applyPresented(event)
             // 只带轮次，本身不画任何东西：汇总与 diff 要按这条事件的 seq 去主机读。
             "workspace/changes" -> applyWorkspaceChanges(event)
@@ -724,7 +760,7 @@ class SessionStore(val sessionId: SessionId) {
                 startedSlot(index, state)?.let { slot ->
                     val prev = state.blocks[slot] as? AssistantBlock.ToolCall
                     state.blocks[slot] = if (prev != null) {
-                        AssistantBlock.ToolCall(prev.callId, chunk["name"].str ?: prev.name, prev.argsRaw + delta)
+                        AssistantBlock.ToolCall(chunk["id"].str?.takeIf { it.isNotEmpty() } ?: prev.callId, chunk["name"].str ?: prev.name, prev.argsRaw + delta)
                     } else {
                         AssistantBlock.ToolCall(chunk["id"].str ?: "", chunk["name"].str ?: "", delta)
                     }
@@ -802,6 +838,16 @@ class SessionStore(val sessionId: SessionId) {
 
     // —— 工具调用 ————————————————————————————————————————————
 
+    /** A projection from a newer cut must not rewrite historical operation paths. */
+    private fun directoryAtSeq(seq: Int): String? {
+        val change = eventWindow.entries.lastOrNull {
+            it.event.seq <= seq && it.event.type == "working-directory/change"
+        }?.event
+        val projection = projectionHistory["workingDirectory"]?.filterKeys { it <= seq }?.maxByOrNull { it.key }
+        return if (change != null && change.seq >= (projection?.key ?: -1)) change.data["cwd"].str ?: cwd
+        else projection?.value?.str ?: cwd
+    }
+
     private fun applyToolCall(event: SessionEvent, view: ToolEventView?) {
         val data = event.data ?: return
         val name = data["name"].str ?: return
@@ -817,6 +863,7 @@ class SessionStore(val sessionId: SessionId) {
                 startSeq = event.seq,
                 time = event.time,
                 callView = if (view?.target == "call") view.view else null,
+                cwd = directoryAtSeq(event.seq),
             )
         )
     }
@@ -829,7 +876,7 @@ class SessionStore(val sessionId: SessionId) {
         val callId = message["toolCallId"].str ?: message["source"]["callId"].str ?: return
         val content = (message["content"].arr ?: emptyList()).map { decodeContentBlock(it) }
         val errorObj = data["error"]
-        val error = errorObj?.let { ToolError(it["name"].str ?: "", it["code"].str ?: "") }
+        val error = errorObj?.let { ToolError(it["name"].str ?: "", it["code"].str ?: "", it["reason"].str) }
         val result = ToolResultData(
             seq = event.seq,
             time = event.time,
@@ -894,6 +941,7 @@ class SessionStore(val sessionId: SessionId) {
                 time = event.time,
                 rootCallId = rootCallId,
                 parentCallId = parentCallId,
+                cwd = directoryAtSeq(event.seq),
             )
         )
     }
@@ -906,20 +954,21 @@ class SessionStore(val sessionId: SessionId) {
         val child = existing?.copy() ?: ToolChatData(
             callId = subCallId,
             name = data["name"].str ?: "",
-            argsRaw = "",
+            argsRaw = data["arguments"]?.let { DshJson.encodeToString(JsonElement.serializer(), it) } ?: "",
             turn = currentTurn,
             step = activeSteps.maxOrNull() ?: 0,
             startSeq = event.seq,
             time = event.time,
             rootCallId = data["rootCallId"].str,
             parentCallId = data["parentCallId"].str,
+            cwd = directoryAtSeq(event.seq),
         )
         child.result = ToolResultData(
             seq = event.seq,
             time = event.time,
             content = (data["content"].arr ?: emptyList()).map { decodeContentBlock(it) },
             isError = data["isError"].bool ?: false,
-            error = data["error"]?.let { ToolError(it["name"].str ?: "", it["code"].str ?: "") },
+            error = data["error"]?.let { ToolError(it["name"].str ?: "", it["code"].str ?: "", it["reason"].str) },
             meta = data["meta"],
         )
         contexts[key] = NodeContext.Tool(child)
@@ -998,6 +1047,13 @@ class SessionStore(val sessionId: SessionId) {
         if (!hasStart) contexts[tailKey] = NodeContext.Tail(TurnTailData(turn, event.seq, event.time))
         val tailCtx = contexts[tailKey] as NodeContext.Tail
         val tail = tailCtx.data
+        tail.endedAt = event.time
+        tail.outcome = when (kind) {
+            "completed" -> TurnOutcome.COMPLETED
+            "error" -> TurnOutcome.FAILED
+            else -> TurnOutcome.STOPPED
+        }
+        tail.runMs = if (kind == "completed" && hasStart) max(0.0, event.time - tail.time) else null
         if (kind == "completed") {
             tail.seq = event.seq
             var lastAssistant: AssistantStepData? = null
@@ -1055,13 +1111,13 @@ class SessionStore(val sessionId: SessionId) {
             lastAssistant?.let { last ->
                 tail.messageId = last.messageId
                 tail.closingText = last.blocks.filterIsInstance<AssistantBlock.Text>().joinToString("") { it.text }
-                tail.runMs = max(0.0, event.time - tail.time)
             }
         } else {
             tail.seq = event.seq
         }
 
         running = false
+        if (liveAttemptTurn == turn) liveAttemptId = null
         if (currentTurn == turn) currentTurn = 0
         for ((key, ctx) in contexts.entries.toList()) {
             val state = (ctx as? NodeContext.Assistant)?.state ?: continue
@@ -1250,13 +1306,23 @@ class SessionStore(val sessionId: SessionId) {
         userQuestions = emptyList()
         changesSeqByTurn.clear()
         refreshPermissions()
+        workingDirectory = null
+        workingDirectorySeq = -1
         for ((key, pair) in projections) decodeSingleProjection(key, pair.first)
+        invalidateGoalActivation()
     }
 
     private fun decodeSingleProjection(key: String, value: JsonElement) {
         when (key) {
             "turnOutline" -> rebuildTurnRail()
             "title" -> value.str?.takeIf { it.isNotEmpty() }?.let { title = it }
+            "workingDirectory" -> {
+                val seq = projections[key]?.second ?: -1
+                if (seq >= workingDirectorySeq) {
+                    workingDirectory = value.str
+                    workingDirectorySeq = seq
+                }
+            }
             "sessionListMetadata" -> value["blank"].bool?.let { blank = it }
             "todos" -> value.arr?.let { list ->
                 todos = list.map {
@@ -1284,6 +1350,7 @@ class SessionStore(val sessionId: SessionId) {
                         )
                     } else null
                 }
+                invalidateGoalActivation()
             }
             "tokenUsage" -> tokenUsage = value.decodeOrNull<TokenUsage>()
             "sessionStats" -> sessionStats = value.decodeOrNull<SessionStatsProjection>()
@@ -1343,6 +1410,23 @@ class SessionStore(val sessionId: SessionId) {
                 is NodeContext.Command -> if (ctx.node.name != "permission") built.add(ChatNode.Command(ctx.node))
                 is NodeContext.Tail -> built.add(ChatNode.TurnTail(ctx.data))
                 is NodeContext.Workflow -> built.add(ChatNode.Workflow(projectWorkflow(ctx.state)))
+            }
+        }
+        // Streamed argument slots are preparation, never an invented dispatch/result.
+        for (ctx in contexts.values) {
+            val state = (ctx as? NodeContext.Assistant)?.state ?: continue
+            if (state.status != AssistantStatus.RUNNING || liveAttemptId == null ||
+                state.turn != liveAttemptTurn || state.step != liveAttemptStep) continue
+            state.blocks.forEachIndexed { index, block ->
+                val call = block as? AssistantBlock.ToolCall ?: return@forEachIndexed
+                if (call.name.isEmpty()) return@forEachIndexed
+                val id = call.callId.ifEmpty { "preparing:${state.turn}:${state.step}:$index" }
+                if (tools.containsKey(id)) return@forEachIndexed
+                tools[id] = ToolChatData(
+                    id, call.name, call.argsRaw, state.turn, state.step, state.startSeq.toInt(), state.time,
+                    cwd = directoryAtSeq(state.startSeq.toInt()), preparing = true,
+                    displaySeq = state.startSeq + index * 0.000001,
+                )
             }
         }
         val childrenByParent = mutableMapOf<CallId, MutableList<ToolChatData>>()
@@ -1411,8 +1495,6 @@ class SessionStore(val sessionId: SessionId) {
 
     private fun rebuildTurnProcessSpecs(rows: List<ChatNode>) {
         turnProcessSpecs.clear()
-        if (hasMore) return
-
         class Accumulator {
             val processAnchors = mutableListOf<Double>()
             var lastAnchor: Double? = null
@@ -1476,7 +1558,8 @@ class SessionStore(val sessionId: SessionId) {
             val acc = byTurn[turn] ?: continue
             val lastAnchor = acc.lastAnchor ?: continue
             if (!acc.lastIsAnswer) continue
-            if (turnEndBoundaryAfter(lastAnchor.toInt()) == null) continue
+            val tail = (contexts["turn-tail:$turn"] as? NodeContext.Tail)?.data ?: continue
+            if (tail.outcome != TurnOutcome.COMPLETED) continue
             val external = acc.processAnchors.filter { it < lastAnchor }.minOrNull()
             if (external == null && !acc.lastReasoning) continue
             val messages = acc.messagesByStep.filterKeys { it < acc.lastStep }.values.sum()
@@ -1489,6 +1572,7 @@ class SessionStore(val sessionId: SessionId) {
                 toolCallCount = acc.toolCalls,
                 subagentCount = acc.subagents,
                 inlineReasoning = acc.lastReasoning,
+                durationMs = tail.runMs,
             )
         }
     }
@@ -1614,7 +1698,10 @@ class SessionStore(val sessionId: SessionId) {
                 rebuildNodes()
             }
             is AssistantStreamFrame.End -> {
-                if (liveAttemptId == frame.attemptId) liveAttemptId = null
+                if (liveAttemptId == frame.attemptId) {
+                    liveAttemptId = null
+                    rebuildNodes()
+                }
             }
         }
     }
@@ -1623,6 +1710,7 @@ class SessionStore(val sessionId: SessionId) {
         val attempt = baseline?.activeAttempt
         if (attempt == null) {
             liveAttemptId = null
+            rebuildNodes()
             return
         }
         liveAttemptId = attempt.attemptId

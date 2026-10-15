@@ -6,6 +6,7 @@ import ai.deepseek.dshphone.net.SessionId
 import ai.deepseek.dshphone.net.arr
 import ai.deepseek.dshphone.net.bool
 import ai.deepseek.dshphone.net.get
+import ai.deepseek.dshphone.net.int
 import ai.deepseek.dshphone.net.str
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
@@ -56,6 +57,21 @@ fun encodeContentBlock(block: ContentBlock): JsonElement = when (block) {
 
 fun plainText(content: List<ContentBlock>): String =
     content.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text }
+
+/** 用户消息 `file` 块里的上传文件引用：`{type:"file", attachment:{attachmentId,name,bytes}}`。 */
+data class FileAttachmentRef(val attachmentId: String, val name: String, val bytes: Int)
+
+/** 消息里的上传文件；本端把 file 块留作 [ContentBlock.Other]，在这里认出来。 */
+fun fileAttachmentRefs(content: List<ContentBlock>): List<FileAttachmentRef> = content.mapNotNull { block ->
+    val raw = (block as? ContentBlock.Other)?.raw
+    if (raw["type"].str != "file") return@mapNotNull null
+    val attachment = raw["attachment"]
+    FileAttachmentRef(
+        attachmentId = attachment["attachmentId"].str ?: return@mapNotNull null,
+        name = attachment["name"].str ?: return@mapNotNull null,
+        bytes = attachment["bytes"].int ?: 0,
+    )
+}
 
 // 助手块 ——————————————————————————————————————————————————————
 

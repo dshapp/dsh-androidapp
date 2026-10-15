@@ -11,6 +11,7 @@ import ai.deepseek.dshphone.state.SessionStore
 import ai.deepseek.dshphone.ui.theme.Dimens
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -38,6 +39,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
@@ -97,6 +99,7 @@ private fun UserBubble(
 ) {
     val text = plainText(content)
     val images = lenientImageRefs(content)
+    val files = fileAttachmentRefs(content)
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         // 气泡最多占列宽的 82%，但短消息只占自己需要的宽度——
         // 旧写法是固定占比，一句「好」也会被拉成横贯半屏的长条。
@@ -109,6 +112,8 @@ private fun UserBubble(
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         ImageGallery(images, sessionId, model, alignEnd = true)
+        files.forEach { MessageFileCard(it) }
+        // 只发文件/图片时没有文字，不画空气泡。
         if (text.isNotEmpty()) {
             // 点气泡弹出「复制」小泡泡，一键复制整句；长按仍走系统文本选择。
             var copyMenu by remember(text) { mutableStateOf(false) }
@@ -167,6 +172,55 @@ private fun UserBubble(
         }
     }
     }
+}
+
+/** 用户消息里的一个上传文件（web `.fileCard`）：文件类型图标、文件名、扩展名与大小。 */
+@Composable
+private fun MessageFileCard(file: FileAttachmentRef) {
+    val dot = file.name.lastIndexOf('.')
+    val ext = if (dot > 0 && dot < file.name.length - 1) file.name.substring(dot + 1) else ""
+    Row(
+        Modifier
+            .width(240.dp)
+            .heightIn(min = 56.dp)
+            .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(Dimens.bubbleRadius))
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Icon(fileTypeIcon(ext), null, Modifier.size(28.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Column {
+            Text(
+                middleTruncate(file.name, 28),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+            )
+            Text(
+                listOf(ext.uppercase(java.util.Locale.ROOT), formatBytes(file.bytes)).filter { it.isNotEmpty() }.joinToString(" "),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+private fun fileTypeIcon(ext: String): ImageVector = when (ext.lowercase(java.util.Locale.ROOT)) {
+    "pdf" -> Icons.Default.PictureAsPdf
+    "png", "jpg", "jpeg", "gif", "webp", "heic", "bmp", "svg" -> Icons.Default.Image
+    "mp4", "mov", "mkv", "webm", "avi" -> Icons.Default.Movie
+    "mp3", "wav", "m4a", "flac", "ogg", "aac" -> Icons.Default.AudioFile
+    "zip", "tar", "gz", "tgz", "rar", "7z", "xz", "bz2" -> Icons.Default.FolderZip
+    "csv", "tsv", "xls", "xlsx", "numbers" -> Icons.Default.TableChart
+    else -> Icons.AutoMirrored.Filled.InsertDriveFile
+}
+
+/** 文件名过长时截中间，保住开头和扩展名（Compose 1.7 还没有 MiddleEllipsis）。 */
+private fun middleTruncate(name: String, max: Int): String {
+    if (name.length <= max) return name
+    val tail = (max - 1) / 2
+    return name.take(max - 1 - tail) + "…" + name.takeLast(tail)
 }
 
 /**

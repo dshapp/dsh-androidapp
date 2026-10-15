@@ -47,6 +47,8 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.ClipboardManager
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -128,6 +130,13 @@ fun ComposerBar(
     ) { uris: List<Uri> ->
         uris.forEach { uri ->
             loadFileAttachment(context, uri)?.let { attachments = attachments + it }
+        }
+    }
+    // 粘贴剪贴板里的图片/文件 URI：与文件选择器同一条路落成附件（图片自动归图片）。
+    val baseClipboard = LocalClipboardManager.current
+    val pasteClipboard = remember(baseClipboard, context) {
+        AttachmentPasteClipboard(baseClipboard, context) { uris ->
+            uris.forEach { uri -> loadFileAttachment(context, uri)?.let { attachments = attachments + it } }
         }
     }
 
@@ -260,6 +269,7 @@ fun ComposerBar(
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
+                CompositionLocalProvider(LocalClipboardManager provides pasteClipboard) {
                 BasicComposerField(
                     value = draft,
                     autoFocus = autoFocus,
@@ -279,6 +289,7 @@ fun ComposerBar(
                         refreshSuggestions(next.text)
                     },
                 )
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(
                         onClick = {
@@ -1004,6 +1015,43 @@ private fun loadImageAttachment(context: android.content.Context, uri: Uri): Pho
         payload = PhoneAttachmentPayload.Image(mediaType, Base64.encodeToString(bytes, Base64.NO_WRAP), bytes),
     )
 }.getOrNull()
+
+/**
+ * 输入框用的剪贴板：剪贴板里是 content/file URI（相册、文件管理器「复制」出来的图片或文件）时，
+ * 粘贴不往正文里塞文字，而是交给 [onUris] 落成附件；其余照常走系统剪贴板。
+ *
+ * 旧版 BasicTextField(TextFieldValue) 不支持 `Modifier.contentReceiver`（只有 TextFieldState 版支持），
+ * 而粘贴恰好只经过 [getText]，所以在这里截住。
+ */
+private class AttachmentPasteClipboard(
+    private val base: ClipboardManager,
+    context: android.content.Context,
+    private val onUris: (List<Uri>) -> Unit,
+) : ClipboardManager by base {
+    private val system = context.getSystemService(android.content.ClipboardManager::class.java)
+
+    /** 只看描述、不读内容：判断「有没有可粘贴的东西」不该触发系统的读剪贴板提示。 */
+    private fun hasUriClip(): Boolean {
+        val description = system?.primaryClipDescription ?: return false
+        return (0 until description.mimeTypeCount).any {
+            val type = description.getMimeType(it)
+            type == android.content.ClipDescription.MIMETYPE_TEXT_URILIST || !type.startsWith("text/")
+        }
+    }
+
+    override fun hasText(): Boolean = base.hasText() || hasUriClip()
+
+    override fun getText(): AnnotatedString? {
+        val clip = system?.primaryClip
+        val uris = clip?.let { data ->
+            (0 until data.itemCount).mapNotNull { data.getItemAt(it).uri }
+                .filter { it.scheme == "content" || it.scheme == "file" }
+        }.orEmpty()
+        if (uris.isEmpty()) return base.getText()
+        onUris(uris)
+        return null
+    }
+}
 
 private fun loadFileAttachment(context: android.content.Context, uri: Uri): PhoneAttachment? = runCatching {
     val resolver = context.contentResolver

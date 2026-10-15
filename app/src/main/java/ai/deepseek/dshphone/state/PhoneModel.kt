@@ -3,6 +3,8 @@ package ai.deepseek.dshphone.state
 import ai.deepseek.dshphone.i18n.Strings
 import ai.deepseek.dshphone.i18n.fmt
 import ai.deepseek.dshphone.model.*
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import ai.deepseek.dshphone.net.*
 import android.app.Application
 import android.graphics.Bitmap
@@ -750,7 +752,9 @@ class PhoneModel private constructor(app: Application) {
             // 主机没认下这个名字：按普通消息继续（与 web `matchEnter` 的落点一致）。
         }
         val requestId = UUID.randomUUID().toString()
-        store.beginPendingSubmission(requestId, if (store.running) "queued" else "transcript", trimmed)
+        store.beginPendingSubmission(
+            requestId, if (store.running) "queued" else "transcript", pendingContent(trimmed, attachments),
+        )
         val content = mutableListOf<PromptContentPart>()
         if (trimmed.isNotEmpty()) content.add(PromptContentPart.Text(trimmed))
         try {
@@ -799,7 +803,7 @@ class PhoneModel private constructor(app: Application) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return false
         val requestId = UUID.randomUUID().toString()
-        store.beginPendingSubmission(requestId, "steering", trimmed)
+        store.beginPendingSubmission(requestId, "steering", pendingContent(trimmed, emptyList()))
         return try {
             client.sessionPrompt(
                 sessionId, "steer", listOf(PromptContentPart.Text(trimmed)),
@@ -813,6 +817,25 @@ class PhoneModel private constructor(app: Application) {
             store.retirePendingSubmission(requestId)
             lastErrorMessage = describe(e)
             false
+        }
+    }
+
+    /**
+     * 本地回声能立刻画的内容：文字，加上每个待传文件的卡片（名字与大小取自暂存副本）。
+     * 图片字节不抄进转写，以主机回来的那条消息为准（对齐 Mac `pendingContent`）。
+     */
+    private fun pendingContent(text: String, attachments: List<PhoneAttachment>): List<ContentBlock> = buildList {
+        if (text.isNotEmpty()) add(ContentBlock.Text(text))
+        for (attachment in attachments) {
+            val file = (attachment.payload as? PhoneAttachmentPayload.FilePayload)?.file ?: continue
+            add(ContentBlock.Other(buildJsonObject {
+                put("type", "file")
+                put("attachment", buildJsonObject {
+                    put("attachmentId", attachment.id)
+                    put("name", attachment.name)
+                    put("bytes", file.length())
+                })
+            }))
         }
     }
 

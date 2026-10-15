@@ -259,8 +259,13 @@ class SessionStore(val sessionId: SessionId) {
         private set
     private var droppedTailSeq: Int? = null
 
-    /** 本地已发出、主机尚未回声的消息。 */
-    data class PendingSubmission(val requestId: String, val placement: String, val time: Double, val text: String)
+    /** 本地已发出、主机尚未回声的消息；content 是能立刻画出来的那部分（文字与文件卡片）。 */
+    data class PendingSubmission(
+        val requestId: String,
+        val placement: String,
+        val time: Double,
+        val content: List<ContentBlock>,
+    )
 
     var pendingSubmissions by mutableStateOf<List<PendingSubmission>>(emptyList())
         private set
@@ -358,9 +363,9 @@ class SessionStore(val sessionId: SessionId) {
 
     // —— 本地投递回声 ————————————————————————————————————————
 
-    fun beginPendingSubmission(requestId: String, placement: String, text: String) {
+    fun beginPendingSubmission(requestId: String, placement: String, content: List<ContentBlock>) {
         pendingSubmissions = pendingSubmissions + PendingSubmission(
-            requestId, placement, System.currentTimeMillis().toDouble(), text,
+            requestId, placement, System.currentTimeMillis().toDouble(), content,
         )
     }
 

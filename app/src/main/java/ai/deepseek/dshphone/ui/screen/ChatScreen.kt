@@ -136,6 +136,8 @@ fun ChatScreen(
     // 已插队、主机还没在步骤边界取走的消息：画在转写尾部，别让它在队列条上消失后无处可寻
     // （对齐 web 的 PendingSteeringBubble / Mac 的 ConversationRoot.pendingSteering）。
     val pendingSteering = store?.steering ?: emptyList()
+    // 已发出、主机还没回声的消息：先画成用户气泡（含文件卡片），回声一到就换成正式节点。
+    val pendingEcho = store?.pendingSubmissions?.filter { it.placement == "transcript" } ?: emptyList()
     val visibleNodes = remember(nodes, finding, findQuery) {
         // 画不出内容的行不占列表项，否则 spacedBy 会在原地留一道空隙，
         // 贴底滚动也会停在一行看不见的东西上。
@@ -503,6 +505,20 @@ fun ChatScreen(
                         }
                     }
                 }
+                items(pendingEcho.size, key = { "pending:" + pendingEcho[it].requestId }) { index ->
+                    val item = pendingEcho[index]
+                    MessageRow(
+                        node = ChatNode.User(store?.lastSeq ?: 0, item.time, item.requestId, item.content),
+                        cwd = cwd,
+                        sessionId = sessionId,
+                        model = model,
+                        store = store,
+                        onOpenFile = { path -> openFileLink(FileLinkTarget(path)) },
+                        onOpenLink = { target -> openFileLink(target) },
+                        onFork = {},
+                        onOpenSession = onOpenSession,
+                    )
+                }
                 // 已插队的消息：排在全部转写节点之后，直到主机在下一个步骤边界把它取走；
                 // 一取走它就变成正式的用户/steering 节点，这里同步消失（队列帧与事件一起到）。
                 items(pendingSteering.size, key = { "pending-steer:" + pendingSteering[it].id }) { index ->
@@ -533,7 +549,7 @@ fun ChatScreen(
                 // 查找一条没命中：给一句「未找到」，别让读者对着一片空白猜。
                 finding && findQuery.isNotBlank() && visibleNodes.isEmpty() && pendingSteering.isEmpty() ->
                     EmptyStateColumn(Icons.Default.SearchOff, Strings.findNoResults, findQuery)
-                nodes.isNotEmpty() || pendingSteering.isNotEmpty() -> Unit
+                nodes.isNotEmpty() || pendingSteering.isNotEmpty() || pendingEcho.isNotEmpty() -> Unit
                 historyError != null -> Column(
                     Modifier
                         .align(Alignment.Center)

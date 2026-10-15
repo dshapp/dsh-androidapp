@@ -8,6 +8,7 @@ import ai.deepseek.dshphone.state.PhoneModel
 import ai.deepseek.dshphone.ui.component.DshFind
 import ai.deepseek.dshphone.ui.component.EmptyStateColumn
 import ai.deepseek.dshphone.ui.component.MessageRow
+import ai.deepseek.dshphone.ui.component.RunningStatusRow
 import ai.deepseek.dshphone.ui.component.SystemImageViewer
 import ai.deepseek.dshphone.ui.theme.Dimens
 import androidx.compose.animation.AnimatedVisibility
@@ -539,6 +540,11 @@ fun ChatScreen(
                         onFork = {},
                         onOpenSession = onOpenSession,
                     )
+                }
+                if (store?.running == true) {
+                    item(key = "running-status") {
+                        RunningStatusRow(nodes, store.runningStartTime, cwd)
+                    }
                 }
             }
 

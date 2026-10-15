@@ -363,6 +363,10 @@ class SessionStore(val sessionId: SessionId) {
 
     // —— 本地投递回声 ————————————————————————————————————————
 
+    /** 运行中这一轮 turn/start 的时间，底部状态行的用时从这里起算；还没载到 turn/start 时为 null。 */
+    val runningStartTime: Double?
+        get() = if (running) (contexts["turn-tail:$currentTurn"] as? NodeContext.Tail)?.data?.time else null
+
     fun beginPendingSubmission(requestId: String, placement: String, content: List<ContentBlock>) {
         pendingSubmissions = pendingSubmissions + PendingSubmission(
             requestId, placement, System.currentTimeMillis().toDouble(), content,

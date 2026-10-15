@@ -78,6 +78,7 @@ object Strings {
     val toolInput: String get() = pick("Input", "输入")
     val toolOutput: String get() = pick("Output", "输出")
     val thinking: String get() = pick("Thinking", "思考过程")
+    val runningAnalyzing: String get() = pick("Analyzing the request", "正在分析请求")
     val compacted: String get() = pick("Context compacted", "上下文已压缩")
     val modelRetry: String get() = pick("Model retried", "模型重试")
     val maxTokens: String get() = pick("Response hit the token limit", "回复达到长度上限")

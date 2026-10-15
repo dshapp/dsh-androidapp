@@ -550,6 +550,36 @@ private fun workflowIcon(status: WorkflowRunStatus): ImageVector = when (status)
     WorkflowRunStatus.INTERRUPTED -> Icons.Default.PauseCircleOutline
 }
 
+/**
+ * 运行中转写底部的状态行（对齐 Mac `RunningStatusRow`）：最新一个还没返回结果的工具调用的摘要，
+ * 没有就是「正在分析请求」；后面跟本轮自 turn/start 起的已用时，每秒走一次，下限 1 秒。
+ */
+@Composable
+fun RunningStatusRow(nodes: List<ChatNode>, startTime: Double?, cwd: String?) {
+    val tool = remember(nodes) {
+        val newestTurn = nodes.lastOrNull { it.turnNumber != null }?.turnNumber
+        nodes.asReversed().asSequence()
+            .takeWhile { it.turnNumber == null || it.turnNumber == newestTurn }
+            .filterIsInstance<ChatNode.Tool>()
+            .firstOrNull { it.data.result == null }?.data
+    }
+    val label = tool?.let { toolRowModel(it, cwd).summary.substringBefore('\n').ifEmpty { it.name } }
+        ?: Strings.runningAnalyzing
+    var now by remember { mutableStateOf(System.currentTimeMillis().toDouble()) }
+    LaunchedEffect(startTime) {
+        while (startTime != null) {
+            now = System.currentTimeMillis().toDouble()
+            kotlinx.coroutines.delay(1000)
+        }
+    }
+    CardRow(
+        Icons.Default.Autorenew,
+        label,
+        suffix = startTime?.let { "· " + formatDuration(maxOf(1000.0, now - it)) },
+        running = true,
+    )
+}
+
 /** 过程折叠控件：一轮里的思考与工具调用折在它后面。 */
 @Composable
 private fun TurnProcessRow(spec: TurnProcessSpec, store: SessionStore?) {

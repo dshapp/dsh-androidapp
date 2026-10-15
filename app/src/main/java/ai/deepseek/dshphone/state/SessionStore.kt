@@ -5,6 +5,7 @@ import ai.deepseek.dshphone.model.*
 import ai.deepseek.dshphone.net.*
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.setValue
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -242,7 +243,8 @@ class SessionStore(val sessionId: SessionId) {
     private val turnPromptRow = mutableMapOf<Int, Int>()
     private val turnResponseRow = mutableMapOf<Int, Int>()
     private val turnProcessSpecs = mutableMapOf<Int, TurnProcessSpec>()
-    private val expandedProcessKeys = mutableSetOf<TurnProcessSpec.Key>()
+    // 可观察：折叠控件的箭头读它，展开/收起要让那一行重组（spec 本身不变，行会被跳过）。
+    private val expandedProcessKeys = mutableStateMapOf<TurnProcessSpec.Key, Unit>()
     private val toolCallRootIndex = mutableMapOf<CallId, Int>()
 
     private var liveAttemptId: String? = null
@@ -1502,7 +1504,7 @@ class SessionStore(val sessionId: SessionId) {
         keyed.removeAll { isFoldedProcessRow(it.third) }
         // 折叠状态下把答案步骤自己的 reasoning 隐掉。
         for (spec in turnProcessSpecs.values) {
-            if (!spec.inlineReasoning || expandedProcessKeys.contains(spec.key)) continue
+            if (!spec.inlineReasoning || expandedProcessKeys.containsKey(spec.key)) continue
             val index = keyed.indexOfFirst {
                 val node = it.third
                 node is ChatNode.Assistant && node.step.turn == spec.turn && node.step.step == spec.answerStep
@@ -1633,13 +1635,14 @@ class SessionStore(val sessionId: SessionId) {
             else -> Unit
         }
         val spec = turnProcessSpecs.values.firstOrNull { it.covers(node.anchorSeq) } ?: return false
-        return !expandedProcessKeys.contains(spec.key)
+        return !expandedProcessKeys.containsKey(spec.key)
     }
 
-    fun isTurnProcessExpanded(spec: TurnProcessSpec): Boolean = expandedProcessKeys.contains(spec.key)
+    fun isTurnProcessExpanded(spec: TurnProcessSpec): Boolean = expandedProcessKeys.containsKey(spec.key)
 
     fun setTurnProcessExpanded(spec: TurnProcessSpec, expanded: Boolean) {
-        val changed = if (expanded) expandedProcessKeys.add(spec.key) else expandedProcessKeys.remove(spec.key)
+        val changed = if (expanded) expandedProcessKeys.put(spec.key, Unit) == null
+            else expandedProcessKeys.remove(spec.key) != null
         if (changed) rebuildNodes()
     }
 

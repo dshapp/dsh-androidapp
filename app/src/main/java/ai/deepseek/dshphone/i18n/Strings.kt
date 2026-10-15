@@ -163,6 +163,15 @@ object Strings {
     val processMessages: String get() = pick("%d replies", "%d 条回复")
     val processTools: String get() = pick("%d tool calls", "%d 次工具调用")
     val processSubagents: String get() = pick("%d subagents", "%d 个子智能体")
+    // 工具增减提示（web `message.tool*`，文案以 Mac L10n 为准）。
+    val toolAdded: String get() = pick("Tool added: %s", "已添加工具：%s")
+    val toolRemoved: String get() = pick("Tool removed: %s", "已移除工具：%s")
+    val toolsUpdated: String get() = pick("Tools updated", "工具已更新")
+    val toolsAddedCount: String get() = pick("%d added", "新增 %d 个")
+    val toolsRemovedCount: String get() = pick("%d removed", "移除 %d 个")
+    val toolsChangedCount: String get() = pick("%d added, %d removed", "新增 %d 个，移除 %d 个")
+    val toolsAddedList: String get() = pick("Added: %s", "新增：%s")
+    val toolsRemovedList: String get() = pick("Removed: %s", "移除：%s")
     // 轮次触发通知（web ui-chat `message.trigger.*`）。
     val turnTriggerRequest: String get() = pick("Execution requested", "收到执行请求")
     val turnTriggerGoal: String get() = pick("Continuing goal", "继续执行目标")

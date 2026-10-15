@@ -82,6 +82,7 @@ fun MessageRow(
         is ChatNode.TurnProcess -> TurnProcessRow(node.spec, store)
         is ChatNode.Workflow -> WorkflowRunCard(node.data)
         is ChatNode.UnknownSurface -> UnknownSurfaceRow(node.data)
+        is ChatNode.ToolChange -> ToolChangeRow(node.data)
     }
 }
 
@@ -419,6 +420,40 @@ private fun UnknownSurfaceRow(data: UnknownSurfaceNode) {
     CardRow(Icons.Default.HelpOutline, data.type, onClick = { detail = true })
     if (detail) {
         CardDetailDialog(Icons.Default.HelpOutline, data.type, null, { detail = false }) { JsonTree(data.data) }
+    }
+}
+
+/**
+ * 工具增减提示行（web `ContextInjectionRow` 的工具形态）：单个变更就是一行提示；
+ * 多个变更标题后跟灰色计数，点开详情弹层看名单。
+ */
+@Composable
+private fun ToolChangeRow(data: ToolChangeNode) {
+    var detail by remember { mutableStateOf(false) }
+    val title = when {
+        !data.single -> Strings.toolsUpdated
+        data.added.isNotEmpty() -> fmt(Strings.toolAdded, data.added[0])
+        else -> fmt(Strings.toolRemoved, data.removed[0])
+    }
+    val summary = when {
+        data.single -> null
+        data.added.isNotEmpty() && data.removed.isNotEmpty() ->
+            fmt(Strings.toolsChangedCount, data.added.size, data.removed.size)
+        data.added.isNotEmpty() -> fmt(Strings.toolsAddedCount, data.added.size)
+        else -> fmt(Strings.toolsRemovedCount, data.removed.size)
+    }
+    CardRow(
+        Icons.Default.Build,
+        title,
+        suffix = summary,
+        onClick = if (data.single) null else ({ detail = true }),
+    )
+    if (detail) {
+        val details = buildList {
+            if (data.added.isNotEmpty()) add(fmt(Strings.toolsAddedList, data.added.joinToString(", ")))
+            if (data.removed.isNotEmpty()) add(fmt(Strings.toolsRemovedList, data.removed.joinToString(", ")))
+        }.joinToString("\n")
+        CardDetailDialog(Icons.Default.Build, title, details, { detail = false }) { SelectionText(details) }
     }
 }
 

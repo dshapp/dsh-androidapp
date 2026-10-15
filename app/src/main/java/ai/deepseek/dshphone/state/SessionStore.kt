@@ -611,6 +611,7 @@ class SessionStore(val sessionId: SessionId) {
             // 0.1.7 起聊天里不画系统提示（web `isVisibleChatNode`），轨迹页才看；
             // 在这里认领掉，免得落进未知 surface 的兜底卡片。
             "system/message" -> Unit
+            "developer/message" -> applyDeveloperMessage(event)
             else -> applyUnknownSurface(event)
         }
     }
@@ -628,6 +629,25 @@ class SessionStore(val sessionId: SessionId) {
         contexts["unknown-surface:${event.seq}"] = NodeContext.Finalized(
             ChatNode.UnknownSurface(UnknownSurfaceNode(event.seq, event.time, event.type, event.data))
         )
+    }
+
+    /**
+     * developer/message 是上下文（web `developerMessageDefinition`）：只有其中的工具增减
+     * 留一行提示（web `isVisibleChatNode`），其余开发者内容一律不进聊天。
+     */
+    private fun applyDeveloperMessage(event: SessionEvent) {
+        val added = mutableListOf<String>()
+        val removed = mutableListOf<String>()
+        for (block in event.data["message"]["content"].arr ?: emptyList()) {
+            val name = block["toolName"].str ?: continue
+            when (block["type"].str) {
+                "tool-addition" -> added.add(name)
+                "tool-removal" -> removed.add(name)
+            }
+        }
+        if (added.isEmpty() && removed.isEmpty()) return
+        val node = ChatNode.ToolChange(ToolChangeNode(event.seq, event.time, added, removed))
+        contexts[node.nodeId] = NodeContext.Finalized(node)
     }
 
     private fun applyInboxSplice(event: SessionEvent) {
@@ -1548,7 +1568,7 @@ class SessionStore(val sessionId: SessionId) {
                     acc.processAnchors.add(node.anchorSeq)
                 }
                 is ChatNode.ModelRetry, is ChatNode.Compaction,
-                is ChatNode.Command, is ChatNode.Workflow, is ChatNode.UnknownSurface ->
+                is ChatNode.Command, is ChatNode.Workflow, is ChatNode.UnknownSurface, is ChatNode.ToolChange ->
                     acc.processAnchors.add(node.anchorSeq)
                 else -> continue
             }

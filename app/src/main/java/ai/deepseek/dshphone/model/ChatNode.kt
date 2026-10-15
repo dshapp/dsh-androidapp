@@ -256,6 +256,15 @@ enum class TurnTriggerKind { REQUEST, GOAL, AGENT, TEAM, SUBAGENT, GITHUB, WEBHO
 
 data class UnknownSurfaceNode(val seq: Int, val time: Double, val type: String, val data: JsonElement?)
 
+/**
+ * 工具增减提示（web `ContextInjectionRow` 的工具形态）：下一次请求的工具表与上一次不同时，
+ * agent 循环会记一条 `developer/message`，这里只留其中的 tool-addition / tool-removal。
+ */
+data class ToolChangeNode(val seq: Int, val time: Double, val added: List<String>, val removed: List<String>) {
+    /** 只变了一个工具：这一行不需要展开名单。 */
+    val single: Boolean get() = added.size + removed.size == 1
+}
+
 data class CompactionSummaryNode(
     val compactionId: String,
     val seq: Int,
@@ -337,6 +346,7 @@ sealed interface ChatNode {
     data class Workflow(val data: WorkflowRunData) : ChatNode
     data class TurnProcess(val spec: TurnProcessSpec) : ChatNode
     data class UnknownSurface(val data: UnknownSurfaceNode) : ChatNode
+    data class ToolChange(val data: ToolChangeNode) : ChatNode
 }
 
 val ChatNode.nodeId: String
@@ -355,6 +365,7 @@ val ChatNode.nodeId: String
         is ChatNode.Workflow -> "wf-${data.runId}"
         is ChatNode.TurnProcess -> "tp-${spec.turn}"
         is ChatNode.UnknownSurface -> "unk-${data.seq}"
+        is ChatNode.ToolChange -> "tc-${data.seq}"
     }
 
 /** 排序锚点：这一行在转写里的位置。 */
@@ -374,6 +385,7 @@ val ChatNode.anchorSeq: Double
         is ChatNode.Workflow -> data.anchorSeq.toDouble()
         is ChatNode.TurnProcess -> spec.processStartSeq - 0.001
         is ChatNode.UnknownSurface -> data.seq.toDouble()
+        is ChatNode.ToolChange -> data.seq.toDouble()
     }
 
 /**

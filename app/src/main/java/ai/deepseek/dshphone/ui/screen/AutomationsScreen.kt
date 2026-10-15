@@ -21,6 +21,8 @@ import kotlinx.coroutines.launch
 fun AutomationsScreen(
     api: ApiClient,
     onBack: () -> Unit,
+    /** 「新建」：任务由会话里的模型创建，这里只开一个预填好开头的新会话。 */
+    onNewTask: () -> Unit = {},
     visible: Boolean = true,
     state: AutomationManagementState = remember(api) { AutomationManagementState() },
     events: Flow<MuxEvent>? = null,
@@ -34,7 +36,7 @@ fun AutomationsScreen(
     if (!visible) return
     fun back() { if (state.draft != null) discard = true else if (state.historyEntry != null) state.closeHistory() else onBack() }
     BackHandler { back() }
-    Scaffold(topBar = { TopAppBar(title = { Text(if (state.historyEntry != null) M.history else M.automations) }, navigationIcon = { TextButton(onClick = { back() }) { Text(M.back) } }, actions = { TextButton(onClick = { scope.launch { state.refresh(rpc) } }) { Text(M.refresh) } }) }) { padding ->
+    Scaffold(topBar = { TopAppBar(title = { Text(if (state.historyEntry != null) M.history else M.automations) }, navigationIcon = { TextButton(onClick = { back() }) { Text(M.back) } }, actions = { TextButton(onClick = onNewTask) { Text(M.newTask) }; TextButton(onClick = { scope.launch { state.refresh(rpc) } }) { Text(M.refresh) } }) }) { padding ->
         LazyColumn(Modifier.fillMaxSize().padding(padding).imePadding(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item { Text(M.scopeHint, style = MaterialTheme.typography.bodySmall) }
             if (!state.factsReady) item { Text(M.text("Current catalog unavailable; edits/deletes disabled. Draft retained.", "当前目录未加载或已失效；禁止修改/删除，草稿保留。")) }

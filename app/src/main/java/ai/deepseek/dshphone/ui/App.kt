@@ -102,7 +102,12 @@ fun DshApp(model: PhoneModel, launch: LaunchRequest?, onLaunchHandled: () -> Uni
                 else Text(Strings.connect)
             }
             composable("automations") {
-                if (api != null) AutomationsScreen(api = api, onBack = { navController.popBackStack() }, state = automationState)
+                if (api != null) AutomationsScreen(
+                    api = api,
+                    onBack = { navController.popBackStack() },
+                    onNewTask = { navController.navigate("new-automation") },
+                    state = automationState,
+                )
                 else Text(Strings.connect)
             }
             composable("archived") {
@@ -130,6 +135,19 @@ fun DshApp(model: PhoneModel, launch: LaunchRequest?, onLaunchHandled: () -> Uni
                             popUpTo("new") { inclusive = true }
                         }
                     },
+                )
+            }
+            // 自动化页的「新建」：同一个新建会话页，输入框预填创建定时任务的开头。
+            composable("new-automation") {
+                NewSessionScreen(
+                    model = model,
+                    onBack = { navController.popBackStack() },
+                    onCreated = {
+                        navController.navigate("chat/$it") {
+                            popUpTo("new-automation") { inclusive = true }
+                        }
+                    },
+                    draft = ai.deepseek.dshphone.i18n.ManagementStrings.newTaskDraft,
                 )
             }
             composable("chat/{sessionId}") { entry ->

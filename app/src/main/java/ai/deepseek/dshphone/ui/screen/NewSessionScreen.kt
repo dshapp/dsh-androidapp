@@ -37,7 +37,13 @@ import kotlinx.coroutines.launch
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun NewSessionScreen(model: PhoneModel, onBack: () -> Unit, onCreated: (SessionId) -> Unit) {
+fun NewSessionScreen(
+    model: PhoneModel,
+    onBack: () -> Unit,
+    onCreated: (SessionId) -> Unit,
+    /** 入口预填的草稿（自动化页「新建」）；会话已有草稿时不覆盖。光标落在末尾、输入框自动聚焦。 */
+    draft: String? = null,
+) {
     val scope = rememberCoroutineScope()
     var workspaceId by remember { mutableStateOf<WorkspaceId?>(null) }
     var sessionId by remember { mutableStateOf<SessionId?>(null) }
@@ -48,7 +54,10 @@ fun NewSessionScreen(model: PhoneModel, onBack: () -> Unit, onCreated: (SessionI
     suspend fun prepare(id: WorkspaceId?) {
         preparing = true
         workspaceId = id
-        sessionId = model.createSession(id)
+        val created = model.createSession(id)
+        // 先写草稿再交出会话 id：输入区挂载时按 id 读一次草稿。
+        if (created != null && draft != null && model.draft(created).isBlank()) model.setDraft(draft, created)
+        sessionId = created
         preparing = false
     }
 

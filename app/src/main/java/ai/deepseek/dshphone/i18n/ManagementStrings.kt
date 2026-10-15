@@ -7,6 +7,9 @@ object ManagementStrings {
     val automations get() = text("Automations", "自动化")
     val back get() = text("Back", "返回")
     val refresh get() = text("Refresh", "刷新")
+    val newTask get() = text("New", "新建")
+    /** 新建自动化任务时预填进新会话输入框的开头（Mac `automationsNewDraft`）。 */
+    val newTaskDraft get() = text("Help me create a scheduled task that runs every day at 9 AM:", "帮我创建一个每天早上9点执行的定时任务:")
     val official get() = text("Official", "官方")
     val installed get() = text("Installed", "已安装")
     val details get() = text("Details", "详情")

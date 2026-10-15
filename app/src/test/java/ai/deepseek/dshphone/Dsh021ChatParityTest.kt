@@ -159,6 +159,20 @@ class Dsh021ChatParityTest {
         }
     }
 
+    @Test fun turnEndingOnToolCallFoldsWholeUpToTurnEnd() {
+        val store = SessionStore("s")
+        start(store)
+        apply(store, 1, "assistant/message",
+            """{"turn":1,"step":1,"message":{"id":"m","content":[{"type":"tool-call","id":"c","name":"read","arguments":"{}"}]}}""")
+        call(store, 2); result(store, 3); end(store, 4)
+        val process = store.nodes.filterIsInstance<ChatNode.TurnProcess>().single().spec
+        assertEquals(4.5, process.foldEndSeq, 0.0)
+        assertFalse(process.inlineReasoning)
+        assertTrue(store.nodes.none { it is ChatNode.Assistant || it is ChatNode.Tool })
+        store.setTurnProcessExpanded(process, true)
+        assertTrue(store.nodes.any { it is ChatNode.Tool })
+    }
+
     @Test fun toolOnlySuccessHasDurationButUnknownStartDoesNotInventDuration() {
         val store = SessionStore("s")
         start(store); call(store, 1); end(store, 2)

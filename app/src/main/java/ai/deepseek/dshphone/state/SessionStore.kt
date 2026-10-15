@@ -1524,29 +1524,46 @@ class SessionStore(val sessionId: SessionId) {
             val messagesByStep = mutableMapOf<Int, Int>()
             var toolCalls = 0
             var subagents = 0
+            /** 轮中有人插话（web `hasInterleavedInput`）：这一轮保持展开。 */
+            var interleaved = false
         }
 
         val byTurn = mutableMapOf<Int, Accumulator>()
         val order = mutableListOf<Int>()
         var openTurn: Int? = null
-        val pendingAnchors = mutableListOf<Double>()
+        // 本轮第一个带轮次的行之前的无轮次行；second 标记它是不是命令。
+        val pendingAnchors = mutableListOf<Pair<Double, Boolean>>()
+        // 输入到来时已经有行的那一轮：同一轮之后若还有步骤/工具调用，这条输入就是插话。
+        var turnBeforeInput: Int? = null
 
         for (node in rows) {
             // 人发的消息和轮次触发通知都是新一轮的开头，之后的行不能再记到前一轮。
             if (node is ChatNode.User || node is ChatNode.Steering || node is ChatNode.TurnTrigger) {
+                openTurn?.let { turnBeforeInput = it }
                 openTurn = null
                 pendingAnchors.clear()
                 continue
             }
-            node.turnNumber?.let { openTurn = it }
+            node.turnNumber?.let { owned ->
+                if (owned == turnBeforeInput && (node is ChatNode.Assistant || node is ChatNode.Tool)) {
+                    byTurn[owned]?.interleaved = true
+                }
+                turnBeforeInput = null
+                openTurn = owned
+            }
             val turn = openTurn
             if (turn == null) {
-                pendingAnchors.add(node.anchorSeq)
+                pendingAnchors.add(node.anchorSeq to (node is ChatNode.Command))
                 continue
             }
             val acc = byTurn.getOrPut(turn) { order.add(turn); Accumulator() }
             if (pendingAnchors.isNotEmpty()) {
-                acc.processAnchors.addAll(pendingAnchors)
+                // turn/start 之前输入的命令（如 /goal）是用户自己的输入，不算过程
+                // （web 只从 turn/start 起折）；轮内的命令照常折叠。
+                val start = turnStartSeqs[turn]?.toDouble()
+                for ((anchor, command) in pendingAnchors) {
+                    if (!command || start == null || anchor >= start) acc.processAnchors.add(anchor)
+                }
                 pendingAnchors.clear()
             }
             when (node) {
@@ -1577,21 +1594,23 @@ class SessionStore(val sessionId: SessionId) {
         for (turn in order) {
             val acc = byTurn[turn] ?: continue
             val lastAnchor = acc.lastAnchor ?: continue
-            if (!acc.lastIsAnswer) continue
             val tail = (contexts["turn-tail:$turn"] as? NodeContext.Tail)?.data ?: continue
-            if (tail.outcome != TurnOutcome.COMPLETED) continue
-            val external = acc.processAnchors.filter { it < lastAnchor }.minOrNull()
-            if (external == null && !acc.lastReasoning) continue
-            val messages = acc.messagesByStep.filterKeys { it < acc.lastStep }.values.sum()
+            if (tail.outcome != TurnOutcome.COMPLETED || acc.interleaved) continue
+            // web `canCollapse`：有最终回答时折起它之前的过程（或它自己的 reasoning）；
+            // 没有最终回答时整轮都是过程，折到 turn/end 为止（web `answerAnchorSeq === null`）。
+            val answer = acc.lastIsAnswer
+            val external = (if (answer) acc.processAnchors.filter { it < lastAnchor } else acc.processAnchors).minOrNull()
+            if (answer && external == null && !acc.lastReasoning) continue
+            val messages = acc.messagesByStep.filterKeys { !answer || it < acc.lastStep }.values.sum()
             turnProcessSpecs[turn] = TurnProcessSpec(
                 turn = turn,
-                processStartSeq = external ?: lastAnchor,
-                answerAnchorSeq = lastAnchor,
+                processStartSeq = min(external ?: lastAnchor, lastAnchor),
+                foldEndSeq = if (answer) lastAnchor else tail.seq + 0.5,
                 answerStep = acc.lastStep,
                 messageCount = messages,
                 toolCallCount = acc.toolCalls,
                 subagentCount = acc.subagents,
-                inlineReasoning = acc.lastReasoning,
+                inlineReasoning = answer && acc.lastReasoning,
                 durationMs = tail.runMs,
             )
         }

@@ -77,10 +77,15 @@ fun toAssistantBlock(block: ContentBlock): AssistantBlock = when (block) {
 
 // 轮次过程折叠 ————————————————————————————————————————————————
 
+/**
+ * 一轮的过程折叠（web `canCollapse`）：有最终回答时折起回答之前的过程；没有最终回答
+ * （如以工具调用结束）时整轮都是过程，一直折到 turn/end。插话、停止、失败的轮不折。
+ */
 data class TurnProcessSpec(
     val turn: Int,
     val processStartSeq: Double,
-    val answerAnchorSeq: Double,
+    /** 折叠区间的开区间终点：最终回答的锚点；没有最终回答时是 turn/end 之后一点。 */
+    val foldEndSeq: Double,
     val answerStep: Int,
     val messageCount: Int,
     val toolCallCount: Int,
@@ -91,7 +96,7 @@ data class TurnProcessSpec(
     data class Key(val turn: Int, val answerStep: Int)
 
     val key: Key get() = Key(turn, answerStep)
-    fun covers(anchor: Double): Boolean = anchor >= processStartSeq && anchor < answerAnchorSeq
+    fun covers(anchor: Double): Boolean = anchor >= processStartSeq && anchor < foldEndSeq
 }
 
 /** 出厂的子智能体委派工具（send_message / list_agents 这类控制工具算普通调用）。 */

@@ -27,7 +27,11 @@ object Dimens {
     val iconSlot = 12.dp
     val bubbleRadius = 18.dp
     val listRowPadding = 4.dp
-    val stripRowHeight = 44.dp
+    /**
+     * 输入区上方的条（目标、收起的提问、排队消息）一行的高度。
+     * Mac QueueDock.rowHeight 是 36pt；手机屏幕更紧，再收到 32dp。
+     */
+    val stripRowHeight = 32.dp
     val stripIconSlot = 28.dp
     val stripSpacing = 8.dp
 }

@@ -589,7 +589,7 @@ private fun workflowIcon(status: WorkflowRunStatus): ImageVector = when (status)
     WorkflowRunStatus.INTERRUPTED -> Icons.Default.PauseCircleOutline
 }
 
-/** 运行状态条的固定高度：一行卡片行高加上下各 2dp。不论有没有在跑都占这一格，记录因此不跳。 */
+/** 运行状态条的固定高度：一行卡片行高加上下各 2dp。只在显示时由会话页让出这一格。 */
 val RunningStatusStripHeight = Dimens.chromeRowHeight + 4.dp
 
 /**

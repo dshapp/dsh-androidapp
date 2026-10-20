@@ -13,6 +13,7 @@ import ai.deepseek.dshphone.ui.component.RunningStatusStripHeight
 import ai.deepseek.dshphone.ui.component.SystemImageViewer
 import ai.deepseek.dshphone.ui.theme.Dimens
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -141,6 +142,15 @@ fun ChatScreen(
     val pendingSteering = store?.steering ?: emptyList()
     // 已发出、主机还没回声的消息：先画成用户气泡（含文件卡片），回声一到就换成正式节点。
     val pendingEcho = store?.pendingSubmissions?.filter { it.placement == "transcript" } ?: emptyList()
+    // 运行状态条：发出消息（还在等主机开轮）到轮次结束之间显示。
+    val runningStripVisible = store?.running == true || pendingEcho.isNotEmpty()
+    // 列表底部只在状态条真的显示时才让出它那一格；空闲时不再常驻一条 22dp 的空白。
+    // 高度变化用动画过渡，跟随尾部（canScrollForward）会在让位的同时把末行贴回底部，
+    // 所以状态条出现/消失时记录是平滑挪动而不是跳一下。
+    val runningStripReserve by animateDpAsState(
+        if (runningStripVisible) RunningStatusStripHeight else 0.dp,
+        label = "runningStripReserve",
+    )
     val visibleNodes = remember(nodes, finding, findQuery) {
         // 画不出内容的行不占列表项，否则 spacedBy 会在原地留一道空隙，
         // 贴底滚动也会停在一行看不见的东西上。
@@ -291,9 +301,12 @@ fun ChatScreen(
                             )
                         }
                     } else {
-                        Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(title, style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 },
+                // 默认 64dp 标题栏在手机上太占地方：收到 52dp，标题用 titleMedium（16sp）配套。
+                expandedHeight = 52.dp,
                 navigationIcon = {
                     IconButton(onClick = { if (finding) exitFind() else onBack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
@@ -428,11 +441,14 @@ fun ChatScreen(
                 // 宽屏（平板、折叠屏展开）限宽居中，一行文字不至于长到读不下去。
                 modifier = Modifier
                     .fillMaxSize()
-                    // 底部常驻让出运行状态条的高度：状态条出现/消失时最后一行不动、也不被遮住。
-                    .padding(bottom = RunningStatusStripHeight)
+                    // 运行状态条显示时让出它的高度，末行不被遮住；空闲时不占位。
+                    .padding(bottom = runningStripReserve)
                     .widthIn(max = Dimens.columnMaxWidth)
                     .align(Alignment.TopCenter),
-                contentPadding = PaddingValues(horizontal = Dimens.columnInset, vertical = 12.dp),
+                // 底部只留 4dp：输入区自己还有 6dp 上边距，两者叠起来就够把末行和输入框分开。
+                contentPadding = PaddingValues(
+                    start = Dimens.columnInset, end = Dimens.columnInset, top = 8.dp, bottom = 4.dp,
+                ),
                 verticalArrangement = Arrangement.spacedBy(Dimens.rowSpacing),
             ) {
                 // 基线没到时别把"加载更早"顶在空列表上：那会和加载态叠成两个状态。
@@ -549,9 +565,9 @@ fun ChatScreen(
 
             // 运行状态条（Mac `RunningStatusRow`）：不是记录里的一行，固定在输入框正上方、
             // 滚动区之外。发出消息（还在等主机开轮）就先显示「正在分析请求」，轮次结束即隐藏；
-            // 不论显示与否都占同一格高度（列表底部让出了这一格），记录因此不会跳动。
+            // 只在显示时让列表底部让出这一格（见 runningStripReserve），空闲时输入框直接贴着记录。
             RunningStatusStrip(
-                visible = store?.running == true || pendingEcho.isNotEmpty(),
+                visible = runningStripVisible,
                 nodes = nodes,
                 startTime = store?.runningStartTime,
                 modifier = Modifier

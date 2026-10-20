@@ -223,8 +223,8 @@ fun ComposerBar(
         Column(
             Modifier
                 .fillMaxWidth()
-                .padding(horizontal = Dimens.columnInset, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(horizontal = Dimens.columnInset, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             header?.invoke()
             TodoStrip(store)
@@ -266,7 +266,7 @@ fun ComposerBar(
                 Modifier
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(22.dp))
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 CompositionLocalProvider(LocalClipboardManager provides pasteClipboard) {
@@ -393,7 +393,7 @@ fun ComposerBar(
                                 if (store.subagentAddress != null) model.interruptSubagent(sessionId)
                                 else model.stop(sessionId)
                             },
-                            modifier = Modifier.size(36.dp),
+                            modifier = Modifier.size(32.dp),
                         ) {
                             Icon(
                                 Icons.Default.Stop, Strings.stop,
@@ -411,7 +411,7 @@ fun ComposerBar(
                             // 插队是队列行上那颗单独的按钮——不点它就不该抢进正在跑的回合。
                             onClick = { send() },
                             enabled = !sendDisabled,
-                            modifier = Modifier.size(36.dp),
+                            modifier = Modifier.size(32.dp),
                         ) {
                             Icon(
                                 Icons.AutoMirrored.Filled.Send, Strings.send,
@@ -496,7 +496,7 @@ private fun BasicComposerField(
     Box(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = 4.dp, vertical = 8.dp)
+            .padding(horizontal = 4.dp, vertical = 5.dp)
     ) {
         if (value.text.isEmpty()) {
             Text(
@@ -823,7 +823,12 @@ private fun HiddenQuestionStrip(store: SessionStore, question: QuestionRequested
             Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
-        TextButton(onClick = { question.callId?.let { store.reopenQuestion(it) } }) {
+        // TextButton 默认最小 40dp 高，会把 32dp 的条撑破：收成条高、横向内边距也收窄。
+        TextButton(
+            onClick = { question.callId?.let { store.reopenQuestion(it) } },
+            modifier = Modifier.height(Dimens.stripRowHeight),
+            contentPadding = PaddingValues(horizontal = 8.dp),
+        ) {
             Text(Strings.questionReopen)
         }
     }
@@ -866,7 +871,7 @@ private fun QueueStrip(model: PhoneModel, sessionId: SessionId, store: SessionSt
                         editing = item
                     },
                     enabled = item.id !in busy,
-                    modifier = Modifier.size(32.dp),
+                    modifier = Modifier.size(28.dp),
                 ) {
                     Icon(Icons.Default.Edit, Strings.queueEdit, Modifier.size(16.dp))
                 }
@@ -876,7 +881,7 @@ private fun QueueStrip(model: PhoneModel, sessionId: SessionId, store: SessionSt
                 IconButton(
                     onClick = { mutate(item.id) { model.steerQueued(item.id, sessionId) } },
                     enabled = steerable,
-                    modifier = Modifier.size(32.dp),
+                    modifier = Modifier.size(28.dp),
                 ) {
                     Icon(
                         Icons.AutoMirrored.Filled.Send,
@@ -889,10 +894,12 @@ private fun QueueStrip(model: PhoneModel, sessionId: SessionId, store: SessionSt
                 IconButton(
                     onClick = { mutate(item.id) { model.removeQueued(item.id, sessionId) } },
                     enabled = item.id !in busy,
-                    modifier = Modifier.size(32.dp),
+                    modifier = Modifier.size(28.dp),
                 ) { Icon(Icons.Default.Close, Strings.queueRemove, Modifier.size(16.dp)) }
             }
-            if (index < queued.size - 1) HorizontalDivider()
+            if (index < queued.size - 1) {
+                HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant)
+            }
         }
     }
     editing?.let { item ->

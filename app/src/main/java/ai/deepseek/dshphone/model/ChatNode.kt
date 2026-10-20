@@ -1,5 +1,7 @@
 package ai.deepseek.dshphone.model
 
+import ai.deepseek.dshphone.i18n.Strings
+import ai.deepseek.dshphone.i18n.fmt
 import ai.deepseek.dshphone.net.DshJson
 import ai.deepseek.dshphone.net.MessageId
 import ai.deepseek.dshphone.net.SessionId
@@ -94,26 +96,49 @@ fun toAssistantBlock(block: ContentBlock): AssistantBlock = when (block) {
 // 轮次过程折叠 ————————————————————————————————————————————————
 
 /**
- * 一轮的过程折叠（web `canCollapse`）：有最终回答时折起回答之前的过程；没有最终回答
- * （如以工具调用结束）时整轮都是过程，一直折到 turn/end。插话、停止、失败的轮不折。
+ * 一轮结束后的折叠头（Mac `TurnProcessSpec` / web `TurnProcessNodeView`）：每个已结束的轮次
+ * 都有一个，文案说明这一轮怎么结束（「已完成，用时 1分14秒」/「已停止」/「处理失败」）。
+ * 可折叠时（web `canCollapse`）：有最终回答时折起回答之前的过程；没有最终回答
+ * （如以工具调用结束）时整轮都是过程，一直折到 turn/end。插话、停止、失败的轮不折，
+ * 折叠头只陈述结局。
  */
 data class TurnProcessSpec(
     val turn: Int,
     val processStartSeq: Double,
-    /** 折叠区间的开区间终点：最终回答的锚点；没有最终回答时是 turn/end 之后一点。 */
-    val foldEndSeq: Double,
+    /**
+     * 折叠区间的开区间终点：最终回答的锚点；没有最终回答时是 turn/end 之后一点。
+     * 不可折叠（停止、失败、插话、无可折内容）时为 null。
+     */
+    val foldEndSeq: Double?,
     val answerStep: Int,
-    val messageCount: Int,
-    val toolCallCount: Int,
-    val subagentCount: Int,
     val inlineReasoning: Boolean,
+    val outcome: TurnOutcome = TurnOutcome.COMPLETED,
+    /** turn/end − turn/start；只有正常完成且载到了 turn/start 时才有。 */
     val durationMs: Double? = null,
 ) {
     data class Key(val turn: Int, val answerStep: Int)
 
     val key: Key get() = Key(turn, answerStep)
-    fun covers(anchor: Double): Boolean = anchor >= processStartSeq && anchor < foldEndSeq
+    val foldable: Boolean get() = foldEndSeq != null
+    fun covers(anchor: Double): Boolean {
+        val end = foldEndSeq ?: return false
+        return anchor >= processStartSeq && anchor < end
+    }
 }
+
+/**
+ * 折叠头的文案就是这一轮的结局（Mac `TurnProcessSpec.label`）：完成且有用时 →
+ * 「已完成，用时 35分53秒」（下限 1 秒）；完成但没有用时 →「已完成」；停止 →「已停止」；
+ * 失败 →「处理失败」。
+ */
+val TurnProcessSpec.label: String
+    get() = when (outcome) {
+        TurnOutcome.STOPPED -> Strings.turnProcessStopped
+        TurnOutcome.FAILED -> Strings.turnProcessFailed
+        TurnOutcome.COMPLETED -> durationMs
+            ?.let { fmt(Strings.turnProcessTook, formatDuration(maxOf(1000.0, it))) }
+            ?: Strings.turnProcessCompleted
+    }
 
 /** 出厂的子智能体委派工具（send_message / list_agents 这类控制工具算普通调用）。 */
 fun isSubagentDelegationTool(name: String): Boolean = name == "subagent" || name.startsWith("subagent_")
@@ -418,6 +443,13 @@ val ChatNode.anchorSeq: Double
 val ChatNode.rendersRow: Boolean
     get() = when (this) {
         is ChatNode.TurnTail -> data.outcome != null || data.messageId != null
+        // 助手 step 只在有可见内容（正文、思考、图片）时成行；工具调用另有自己的行。
+        // 首个 token 之前 step 还没有任何块，记录里不画东西也不留空行——此时唯一的
+        // 运行提示是输入框上方的状态条（Mac `RunningStatusRow`）。
+        is ChatNode.Assistant -> step.blocks.any { block ->
+            (block is AssistantBlock.Text && block.text.isNotEmpty()) ||
+                block is AssistantBlock.Reasoning || block is AssistantBlock.Image
+        }
         else -> true
     }
 

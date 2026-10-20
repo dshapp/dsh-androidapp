@@ -8,7 +8,8 @@ import ai.deepseek.dshphone.state.PhoneModel
 import ai.deepseek.dshphone.ui.component.DshFind
 import ai.deepseek.dshphone.ui.component.EmptyStateColumn
 import ai.deepseek.dshphone.ui.component.MessageRow
-import ai.deepseek.dshphone.ui.component.RunningStatusRow
+import ai.deepseek.dshphone.ui.component.RunningStatusStrip
+import ai.deepseek.dshphone.ui.component.RunningStatusStripHeight
 import ai.deepseek.dshphone.ui.component.SystemImageViewer
 import ai.deepseek.dshphone.ui.theme.Dimens
 import androidx.compose.animation.AnimatedVisibility
@@ -427,6 +428,8 @@ fun ChatScreen(
                 // 宽屏（平板、折叠屏展开）限宽居中，一行文字不至于长到读不下去。
                 modifier = Modifier
                     .fillMaxSize()
+                    // 底部常驻让出运行状态条的高度：状态条出现/消失时最后一行不动、也不被遮住。
+                    .padding(bottom = RunningStatusStripHeight)
                     .widthIn(max = Dimens.columnMaxWidth)
                     .align(Alignment.TopCenter),
                 contentPadding = PaddingValues(horizontal = Dimens.columnInset, vertical = 12.dp),
@@ -542,12 +545,20 @@ fun ChatScreen(
                         onOpenSession = onOpenSession,
                     )
                 }
-                if (store?.running == true) {
-                    item(key = "running-status") {
-                        RunningStatusRow(nodes, store.runningStartTime, cwd)
-                    }
-                }
             }
+
+            // 运行状态条（Mac `RunningStatusRow`）：不是记录里的一行，固定在输入框正上方、
+            // 滚动区之外。发出消息（还在等主机开轮）就先显示「正在分析请求」，轮次结束即隐藏；
+            // 不论显示与否都占同一格高度（列表底部让出了这一格），记录因此不会跳动。
+            RunningStatusStrip(
+                visible = store?.running == true || pendingEcho.isNotEmpty(),
+                nodes = nodes,
+                startTime = store?.runningStartTime,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .widthIn(max = Dimens.columnMaxWidth)
+                    .padding(horizontal = Dimens.columnInset),
+            )
 
             // 转写的三种"没内容"形态只认基线：基线还在路上一律转圈，
             // 只有真的拿到了基线还是零节点才算空会话，取不回来则报错并给重试。

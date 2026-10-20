@@ -1532,9 +1532,6 @@ class SessionStore(val sessionId: SessionId) {
             var lastStep = 0
             var lastIsAnswer = false
             var lastReasoning = false
-            val messagesByStep = mutableMapOf<Int, Int>()
-            var toolCalls = 0
-            var subagents = 0
             /** 轮中有人插话（web `hasInterleavedInput`）：这一轮保持展开。 */
             var interleaved = false
         }
@@ -1581,7 +1578,6 @@ class SessionStore(val sessionId: SessionId) {
                 is ChatNode.Assistant -> {
                     val step = node.step
                     val hasReply = step.blocks.any { isReplyBlock(it) }
-                    if (hasReply) acc.messagesByStep[step.step] = (acc.messagesByStep[step.step] ?: 0) + 1
                     acc.lastAnchor?.let { acc.processAnchors.add(it) }
                     val isAnswer = step.status == AssistantStatus.SETTLED && hasReply &&
                         step.blocks.none { it is AssistantBlock.ToolCall }
@@ -1591,10 +1587,7 @@ class SessionStore(val sessionId: SessionId) {
                     acc.lastIsAnswer = isAnswer
                     acc.lastReasoning = reasoning
                 }
-                is ChatNode.Tool -> {
-                    if (isSubagentDelegationTool(node.data.name)) acc.subagents++ else acc.toolCalls++
-                    acc.processAnchors.add(node.anchorSeq)
-                }
+                is ChatNode.Tool,
                 is ChatNode.ModelRetry, is ChatNode.Compaction,
                 is ChatNode.Command, is ChatNode.Workflow, is ChatNode.UnknownSurface, is ChatNode.ToolChange ->
                     acc.processAnchors.add(node.anchorSeq)
@@ -1605,24 +1598,24 @@ class SessionStore(val sessionId: SessionId) {
         for (turn in order) {
             val acc = byTurn[turn] ?: continue
             val lastAnchor = acc.lastAnchor ?: continue
+            // 只有已结束的轮次才有折叠头（Mac 对仍在进行的轮不画）。
             val tail = (contexts["turn-tail:$turn"] as? NodeContext.Tail)?.data ?: continue
-            if (tail.outcome != TurnOutcome.COMPLETED || acc.interleaved) continue
-            // web `canCollapse`：有最终回答时折起它之前的过程（或它自己的 reasoning）；
-            // 没有最终回答时整轮都是过程，折到 turn/end 为止（web `answerAnchorSeq === null`）。
+            val outcome = tail.outcome ?: continue
+            // web `canCollapse`：正常结束、无插话，且有东西可折——有最终回答时折起它之前的过程
+            // （或它自己的 reasoning）；没有最终回答时整轮都是过程，折到 turn/end 为止
+            // （web `answerAnchorSeq === null`）。停止、失败的轮折叠头只陈述结局（Mac 同口径）。
             val answer = acc.lastIsAnswer
             val external = (if (answer) acc.processAnchors.filter { it < lastAnchor } else acc.processAnchors).minOrNull()
-            if (answer && external == null && !acc.lastReasoning) continue
-            val messages = acc.messagesByStep.filterKeys { !answer || it < acc.lastStep }.values.sum()
+            val foldable = outcome == TurnOutcome.COMPLETED && !acc.interleaved &&
+                (!answer || external != null || acc.lastReasoning)
             turnProcessSpecs[turn] = TurnProcessSpec(
                 turn = turn,
                 processStartSeq = min(external ?: lastAnchor, lastAnchor),
-                foldEndSeq = if (answer) lastAnchor else tail.seq + 0.5,
+                foldEndSeq = if (!foldable) null else if (answer) lastAnchor else tail.seq + 0.5,
                 answerStep = acc.lastStep,
-                messageCount = messages,
-                toolCallCount = acc.toolCalls,
-                subagentCount = acc.subagents,
-                inlineReasoning = answer && acc.lastReasoning,
-                durationMs = tail.runMs,
+                inlineReasoning = foldable && answer && acc.lastReasoning,
+                outcome = outcome,
+                durationMs = if (outcome == TurnOutcome.COMPLETED) tail.runMs else null,
             )
         }
     }

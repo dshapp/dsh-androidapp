@@ -36,7 +36,12 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
-/** 转写里任何一张可展开卡片的一行：图标 + 摘要（+ 附注）。 */
+/**
+ * 转写里任何一张可展开卡片的一行：图标 + 摘要（+ 附注）。
+ *
+ * 卡片族（工具、思考、提示行）共用这一套最小行高与字号（Mac/iOS `chromeRowHeight` 18）。
+ * [running] 时图标槽仍是卡片自己的图标，图标与摘要一起呼吸（[breathing]）即运行态。
+ */
 @Composable
 fun CardRow(
     icon: ImageVector,
@@ -65,17 +70,10 @@ fun CardRow(
             modifier = Modifier
                 .weight(1f)
                 .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
-                .padding(vertical = 2.dp),
+                .padding(vertical = 1.dp)
+                .breathing(running),
         ) {
-            if (running) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(Dimens.iconSlot),
-                    strokeWidth = 1.5.dp,
-                    color = tint,
-                )
-            } else {
-                Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(Dimens.iconSlot))
-            }
+            Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(Dimens.iconSlot))
             val findStyle = if (findQuery.isBlank()) null else findSpanStyle(findActive)
             val summaryText = if (findStyle == null) AnnotatedString(summary)
             else androidx.compose.ui.text.buildAnnotatedString {
@@ -151,7 +149,13 @@ fun CardDetailDialog(
 
 /** 思考卡片：行上只显示第一行，全文在弹层里看。 */
 @Composable
-fun ThinkCard(text: String, findQuery: String = "", findActive: Boolean = false) {
+fun ThinkCard(
+    text: String,
+    findQuery: String = "",
+    findActive: Boolean = false,
+    /** 仍在流式输出：所在 step 还在跑，且这段 reasoning 是该 step 的最后一个块。 */
+    running: Boolean = false,
+) {
     var detail by remember { mutableStateOf(false) }
     val summary = remember(text) {
         val line = text.trimStart().substringBefore('\n').trim()
@@ -160,6 +164,7 @@ fun ThinkCard(text: String, findQuery: String = "", findActive: Boolean = false)
     CardRow(
         Icons.Outlined.Psychology,
         summary,
+        running = running,
         onClick = { detail = true },
         findQuery = findQuery,
         findActive = findActive,

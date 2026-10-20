@@ -150,7 +150,11 @@ class Dsh021ChatParityTest {
         for ((kind, expected) in listOf("aborted" to TurnOutcome.STOPPED, "error" to TurnOutcome.FAILED)) {
             val store = SessionStore("s")
             start(store); assistant(store); end(store, 2, kind)
-            assertTrue(store.nodes.filterIsInstance<ChatNode.TurnProcess>().isEmpty())
+            // Mac 对每个已结束的轮次都给折叠头；停止/失败的只陈述结局，不折任何东西。
+            val process = store.nodes.filterIsInstance<ChatNode.TurnProcess>().single().spec
+            assertFalse(process.foldable)
+            assertEquals(expected, process.outcome)
+            assertNull(process.durationMs)
             assertTrue(store.nodes.filterIsInstance<ChatNode.Assistant>().single().step.blocks.any { it is AssistantBlock.Reasoning })
             val tail = store.nodes.filterIsInstance<ChatNode.TurnTail>().single()
             assertEquals(expected, tail.data.outcome)
@@ -166,7 +170,7 @@ class Dsh021ChatParityTest {
             """{"turn":1,"step":1,"message":{"id":"m","content":[{"type":"tool-call","id":"c","name":"read","arguments":"{}"}]}}""")
         call(store, 2); result(store, 3); end(store, 4)
         val process = store.nodes.filterIsInstance<ChatNode.TurnProcess>().single().spec
-        assertEquals(4.5, process.foldEndSeq, 0.0)
+        assertEquals(4.5, process.foldEndSeq!!, 0.0)
         assertFalse(process.inlineReasoning)
         assertTrue(store.nodes.none { it is ChatNode.Assistant || it is ChatNode.Tool })
         store.setTurnProcessExpanded(process, true)

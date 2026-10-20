@@ -9,6 +9,13 @@ import ai.deepseek.dshphone.net.str
 import ai.deepseek.dshphone.state.PhoneModel
 import ai.deepseek.dshphone.state.SessionStore
 import ai.deepseek.dshphone.ui.theme.Dimens
+import ai.deepseek.dshphone.ui.theme.DshChrome
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -372,7 +379,9 @@ private fun AssistantRow(
                 is AssistantBlock.Text -> androidx.compose.foundation.text.selection.SelectionContainer(
                     Modifier
                         .fillMaxWidth()
-                        .padding(vertical = Dimens.messageTopInset)
+                        // 只加在正文消息顶部（iOS PhoneLayout.messageTopInset）：
+                        // 与上方的过程拉开节奏，下方紧接的卡片仍按 rowSpacing 紧排。
+                        .padding(top = Dimens.messageTopInset)
                 ) {
                     MarkdownText(
                         block.text,
@@ -389,13 +398,15 @@ private fun AssistantRow(
                         },
                     )
                 }
-                is AssistantBlock.Reasoning -> ThinkCard(block.text, findQuery, findActive)
+                // 仍在流式输出的思考（运行中 step 的最后一个块）与运行中的工具行同一呼吸态；
+                // 后面一旦出现正文/工具调用，或 step 结算，就停下。
+                is AssistantBlock.Reasoning -> ThinkCard(
+                    block.text, findQuery, findActive,
+                    running = step.status == AssistantStatus.RUNNING && step.blocks.lastOrNull() === block,
+                )
                 // 图片块在上面成组处理了，这里不再重复。
                 else -> Unit
             }
-        }
-        if (step.status == AssistantStatus.RUNNING && step.blocks.isEmpty()) {
-            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
         }
     }
 }
@@ -559,51 +570,113 @@ private fun workflowIcon(status: WorkflowRunStatus): ImageVector = when (status)
     WorkflowRunStatus.INTERRUPTED -> Icons.Default.PauseCircleOutline
 }
 
+/** 运行状态条的固定高度：一行卡片行高加上下各 2dp。不论有没有在跑都占这一格，记录因此不跳。 */
+val RunningStatusStripHeight = Dimens.chromeRowHeight + 4.dp
+
 /**
- * 运行中转写底部的状态行（对齐 Mac `RunningStatusRow`）：最新一个还没返回结果的工具调用的摘要，
- * 没有就是「正在分析请求」；后面跟本轮自 turn/start 起的已用时，每秒走一次，下限 1 秒。
+ * 运行状态条（对齐 Mac `RunningStatusRow`）：固定在输入框正上方、滚动区之外，
+ * 内容是 小转圈 + 工作类别（[runningStatusLabel]）+ 「· 用时」。用时从本轮 turn/start
+ * 起算、每秒刷新、下限 1 秒；拿不到 turn/start 时只显示文案。左边距与卡片图标对齐
+ * （转圈坐在同一个 [Dimens.iconSlot] 槽里）。[visible] 为 false 时只占位不画。
  */
 @Composable
-fun RunningStatusRow(nodes: List<ChatNode>, startTime: Double?, cwd: String?) {
-    val tool = remember(nodes) {
-        val newestTurn = nodes.lastOrNull { it.turnNumber != null }?.turnNumber
-        nodes.asReversed().asSequence()
-            .takeWhile { it.turnNumber == null || it.turnNumber == newestTurn }
-            .filterIsInstance<ChatNode.Tool>()
-            .firstOrNull { it.data.result == null }?.data
-    }
-    val label = tool?.let { toolRowModel(it, cwd).summary.substringBefore('\n').ifEmpty { it.name } }
-        ?: Strings.runningAnalyzing
-    var now by remember { mutableStateOf(System.currentTimeMillis().toDouble()) }
-    LaunchedEffect(startTime) {
-        while (startTime != null) {
-            now = System.currentTimeMillis().toDouble()
-            kotlinx.coroutines.delay(1000)
+fun RunningStatusStrip(
+    visible: Boolean,
+    nodes: List<ChatNode>,
+    startTime: Double?,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier
+            .fillMaxWidth()
+            .height(RunningStatusStripHeight),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (!visible) return@Row
+        val label = remember(nodes, Strings.locale) { runningStatusLabel(nodes) }
+        var now by remember { mutableStateOf(System.currentTimeMillis().toDouble()) }
+        LaunchedEffect(startTime) {
+            while (startTime != null) {
+                now = System.currentTimeMillis().toDouble()
+                kotlinx.coroutines.delay(1000)
+            }
+        }
+        Box(Modifier.size(Dimens.iconSlot), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(10.dp),
+                strokeWidth = 1.5.dp,
+                color = DshChrome.label,
+            )
+        }
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = DshChrome.label,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        runningStatusElapsed(startTime, now)?.let { elapsed ->
+            Text(
+                "· $elapsed",
+                style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
+                color = DshChrome.label,
+                maxLines = 1,
+            )
         }
     }
-    CardRow(
-        Icons.Default.Autorenew,
-        label,
-        suffix = startTime?.let { "· " + formatDuration(maxOf(1000.0, now - it)) },
-        running = true,
-    )
 }
 
-/** 过程折叠控件：一轮里的思考与工具调用折在它后面。 */
+/**
+ * 轮次折叠头（对齐 Mac `TurnProcessRow`）：文案就是这一轮的结局（[label]），
+ * 字号与助手正文同档、颜色是卡片标题的次级灰，不画背景；可折叠时文字右侧紧跟一个
+ * 向下箭头，展开时转 180°，按下时文字提亮一档。下方一条整宽分割线。
+ */
 @Composable
 private fun TurnProcessRow(spec: TurnProcessSpec, store: SessionStore?) {
     val expanded = store?.isTurnProcessExpanded(spec) ?: false
-    val summary = buildList {
-        if (spec.messageCount > 0) add(fmt(Strings.processMessages, spec.messageCount))
-        if (spec.toolCallCount > 0) add(fmt(Strings.processTools, spec.toolCallCount))
-        if (spec.subagentCount > 0) add(fmt(Strings.processSubagents, spec.subagentCount))
-    }.ifEmpty { if (spec.inlineReasoning) listOf(Strings.thinking) else emptyList() }.joinToString(" · ")
-    CardRow(
-        if (expanded) Icons.Default.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
-        summary,
-        suffix = spec.durationMs?.let(::formatDuration),
-        onClick = { store?.setTurnProcessExpanded(spec, !expanded) },
-    )
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val tint = if (spec.foldable && pressed) MaterialTheme.colorScheme.onSurfaceVariant else DshChrome.label
+    val rotation by animateFloatAsState(if (expanded) 180f else 0f, tween(100), label = "turn-process-chevron")
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .then(
+                if (spec.foldable) Modifier.clickable(
+                    interactionSource = interaction,
+                    indication = null,
+                    role = Role.Button,
+                ) { store?.setTurnProcessExpanded(spec, !expanded) } else Modifier
+            ),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                spec.label,
+                style = MaterialTheme.typography.bodyLarge,
+                color = tint,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            if (spec.foldable) {
+                Icon(
+                    Icons.Default.ExpandMore,
+                    contentDescription = null,
+                    tint = tint,
+                    modifier = Modifier
+                        .size(18.dp)
+                        .rotate(rotation),
+                )
+            }
+        }
+        HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outlineVariant)
+    }
 }
 
 /** 一轮结束的页脚：复制回复、分支、用量与用时、结束时刻。 */
@@ -616,11 +689,14 @@ private fun TurnTailRow(
     store: SessionStore?,
 ) {
     if (data.outcome == TurnOutcome.FAILED || data.outcome == TurnOutcome.STOPPED) {
-        NoticeRow(
-            if (data.outcome == TurnOutcome.FAILED) Icons.Default.Warning else Icons.Default.PauseCircle,
-            if (data.outcome == TurnOutcome.FAILED) Strings.workflowStatusFailed else Strings.workflowStatusInterrupted,
-            if (data.outcome == TurnOutcome.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        // 停止/失败已由这一轮的折叠头（「已停止」「处理失败」）说明，轮尾不再重复一行提示；
+        // 与 Mac `TurnTailRow` 一样只留本轮的文件卡片（没有收尾消息就没有操作行）。
+        store?.let {
+            Column(Modifier.fillMaxWidth()) {
+                ChangedFilesCard(model, it, data.turn)
+                PresentedFilesRow(model, it, data.turn)
+            }
+        }
         return
     }
     val clipboard = LocalClipboardManager.current

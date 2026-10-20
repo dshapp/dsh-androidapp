@@ -21,9 +21,10 @@ object Dimens {
     val messageTopInset = 8.dp
     val cardRadius = 12.dp
     val cardPadding = 12.dp
-    val chromeRowHeight = 24.dp
-    /** 卡片行左侧图标：比正文行的图标小一级，跟摘要的字号配套。 */
-    val iconSlot = 14.dp
+    /** 卡片行（思考、工具、提示）的最小高度，与 iOS PhoneLayout / Mac 同一紧凑节奏。 */
+    val chromeRowHeight = 18.dp
+    /** 卡片行左侧图标：略小于摘要文字的视觉高度，跟 12sp 摘要配套。 */
+    val iconSlot = 12.dp
     val bubbleRadius = 18.dp
     val listRowPadding = 4.dp
     val stripRowHeight = 44.dp

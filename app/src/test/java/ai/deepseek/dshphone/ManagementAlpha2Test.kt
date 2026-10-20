@@ -14,20 +14,14 @@ class ManagementAlpha2Test {
     private class Fake : ManagementTransport {
         val calls = mutableListOf<Pair<String, JsonObject>>()
         var update: JsonElement = JsonObject(emptyMap())
-        var wait: JsonElement = JsonNull
         var history: JsonElement = JsonObject(emptyMap())
-        var failInstall = false
         var failReads = false
         var catalog: JsonElement = JsonArray(emptyList())
         override suspend fun call(method: String, args: JsonObject): JsonElement {
             calls += method to args
-            if (failReads && method in listOf("pluginManager/listBundles", "schedule/catalog")) throw IllegalStateException("unavailable")
+            if (failReads && method == "schedule/catalog") throw IllegalStateException("unavailable")
             return when (method) {
-                "pluginManager/listBundles", "pluginManager/listPlugins" -> JsonArray(emptyList())
                 "schedule/catalog" -> catalog
-                "pluginManager/listVersionExemptions" -> JsonObject(emptyMap())
-                "pluginManager/installBundle" -> if (failInstall) throw IllegalStateException("disconnected") else JsonObject(emptyMap())
-                "pluginManager/waitForInstall" -> wait
                 "schedule/update" -> update
                 "schedule/history" -> history
                 else -> JsonObject(emptyMap())
@@ -42,17 +36,6 @@ class ManagementAlpha2Test {
         assertEquals(setOf("id", "kind", "title", "prompt", "scheduledAt", "afterSeconds"), scheduleExpected(entry("after").raw).keys)
         assertEquals(setOf("id", "kind", "title", "prompt", "scheduledAt", "time", "timeZone"), scheduleExpected(entry("daily").raw).keys)
         assertEquals(setOf("id", "kind", "title", "prompt", "scheduledAt", "expression", "timeZone"), scheduleExpected(entry("cron").raw).keys)
-    }
-    @Test fun updatesOnlyProfileVersionOrChangedDevLink() {
-        fun bundle(availability: String, version: String, spec: String, source: String? = null) = ManagedBundle(buildJsonObject {
-            put("name", "p"); put("installed", true); put("availability", availability); put("version", version)
-            put("installTarget", buildJsonObject { put("spec", spec); put("version", if (spec.startsWith("link:")) "dev" else "0.2.1-alpha.2") })
-            source?.let { put("source", it) }
-        })
-        assertTrue(bundle("profile", "0.2.0", "p@0.2.1-alpha.2").updateAvailable)
-        assertFalse(bundle("installation", "0.2.0", "p@0.2.1-alpha.2").updateAvailable)
-        assertFalse(bundle("profile", "0.2.1-alpha.2", "p@0.2.1-alpha.2").updateAvailable)
-        assertTrue(bundle("profile", "dev", "link:/new", "link:/old").updateAvailable)
     }
     @Test fun missingExpectedFieldsFailClosed() {
         assertThrows(IllegalStateException::class.java) { scheduleExpected(obj("""{"id":"x","kind":"weekly","title":"title","prompt":"p","scheduledAt":"2026-10-14T02:00:00Z"}""")) }
@@ -80,33 +63,6 @@ class ManagementAlpha2Test {
         assertNotNull(draft.copy(zone = "GMT+8").validate())
         assertNotNull(draft.copy(time = "24:00:00").validate())
         assertNotNull(AutomationDraft(entry()).copy(timingChanged = true, seconds = "59").validate())
-    }
-    @Test fun exactHostInstallTargetAndOfficialFlagAreIndependentOfOptional() = runBlocking {
-        val bundle = ManagedBundle(obj("""{"name":"@deepseek-ai/task","official":true,"optional":false,"availability":"missing","installTarget":{"spec":"@deepseek-ai/task@0.2.1-alpha.2","version":"0.2.1-alpha.2"}}"""))
-        assertTrue(bundle.official)
-        val fake = Fake(); ManagementRpc(fake).install(bundle.installSpec!!, "original-id", true)
-        val (method, args) = fake.calls.single()
-        assertEquals("pluginManager/installBundle", method)
-        assertEquals(bundle.installSpec, args["spec"].str)
-        assertEquals("original-id", args["options"]["requestId"].str)
-        assertEquals(true, args["options"]["saveExact"].bool)
-        assertNull(args["options"]["approvedBuilds"])
-    }
-    @Test fun uncertainInstallRecoversSameIdAndNeverInstallsTwice() = runBlocking {
-        val fake = Fake().apply { failInstall = true }; val rpc = ManagementRpc(fake); val state = PluginManagementState()
-        state.refresh(rpc)
-        state.install(rpc, "@deepseek-ai/task@0.2.1-alpha.2", true)
-        val originalId = state.requestId
-        assertNotNull(originalId)
-        state.install(rpc, "anything-else", true)
-        state.recover(rpc)
-        assertEquals(originalId, state.requestId)
-        assertTrue(state.result is JsonNull)
-        assertEquals(1, fake.calls.count { it.first == "pluginManager/installBundle" })
-        assertEquals(originalId, fake.calls.first { it.first == "pluginManager/waitForInstall" }.second["requestId"].str)
-        state.dismissUnknown()
-        assertNull(state.requestId)
-        assertEquals(1, fake.calls.count { it.first == "pluginManager/installBundle" })
     }
     @Test fun conflictAndRefreshRetainDraftAndExpected() = runBlocking {
         val fake = Fake().apply { update = obj("""{"id":"task","updated":false,"code":"schedule_conflict"}""") }
@@ -145,24 +101,16 @@ class ManagementAlpha2Test {
         assertEquals(obj("""{"request":{"sessionId":"session"}}"""), fake.calls[1].second)
         assertEquals(obj("""{"request":{"sessionId":"session","id":"task"}}"""), fake.calls[2].second)
     }
-    @Test fun exemptionsRequireExplicitRiskAndExactVersions() = runBlocking {
-        val fake = Fake(); val rpc = ManagementRpc(fake)
-        try { rpc.versionExemption("@deepseek-ai/task@latest", "0.2.1-alpha.2", true, true); fail("range accepted") } catch (_: IllegalArgumentException) {}
-        try { rpc.versionExemption("@deepseek-ai/task@0.2.1-alpha.2", "0.2.1-alpha.2", true); fail("risk not accepted") } catch (_: IllegalArgumentException) {}
-        rpc.versionExemption("@deepseek-ai/task@0.2.1-alpha.2", "0.2.1-alpha.2", true, true)
-        assertEquals("pluginManager/setVersionExemption", fake.calls.single().first)
-        assertEquals(true, fake.calls.single().second["acceptRisk"].bool)
-    }
     @Test fun staleFactsDisableWritesButRetainDraft() = runBlocking {
         val fake = Fake().apply { catalog = JsonArray(listOf(entry().raw)) }; val rpc = ManagementRpc(fake)
-        val plugins = PluginManagementState(); val automations = AutomationManagementState()
-        plugins.refresh(rpc); automations.refresh(rpc); automations.edit(entry())
+        val automations = AutomationManagementState()
+        automations.refresh(rpc); automations.edit(entry())
         val original = automations.draft
-        fake.failReads = true; plugins.refresh(rpc); automations.refresh(rpc)
-        assertFalse(plugins.factsReady); assertFalse(automations.factsReady)
-        plugins.install(rpc, "target", true); automations.save(rpc); automations.delete(rpc, entry())
+        fake.failReads = true; automations.refresh(rpc)
+        assertFalse(automations.factsReady)
+        automations.save(rpc); automations.delete(rpc, entry())
         assertEquals(original, automations.draft)
-        assertFalse(fake.calls.any { it.first in listOf("pluginManager/installBundle", "schedule/update", "schedule/delete") })
+        assertFalse(fake.calls.any { it.first in listOf("schedule/update", "schedule/delete") })
     }
     @Test fun malformedEditorDoesNotThrowOrCreateDraft() = runBlocking {
         val malformed = ManagedAutomation(obj("""{"id":"task","sessionId":"session","kind":"weekly","status":"active"}"""))

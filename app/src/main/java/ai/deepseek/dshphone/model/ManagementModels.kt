@@ -6,22 +6,6 @@ import java.time.LocalTime
 import java.time.ZoneId
 
 /** Raw objects retain future Host fields; optimistic writes use only the exact ScheduleRecord. */
-data class ManagedBundle(val raw: JsonObject) {
-    val name get() = raw["name"].str.orEmpty()
-    val official get() = raw["official"].bool == true
-    val enabled get() = raw["enabled"].bool == true
-    val installed get() = raw["installed"].bool == true
-    val missing get() = raw["availability"].str == "missing"
-    val readOnly get() = raw["readOnlyReason"].str
-    val removable get() = raw["removable"].bool == true && installed
-    val version get() = raw["version"].str
-    val installSpec get() = raw["installTarget"]["spec"].str?.takeIf { it.isNotBlank() && !installVersion.isNullOrBlank() }
-    val updateAvailable get() = installed && raw["availability"].str == "profile" && installSpec != null && (version != installVersion || (installSpec!!.startsWith("link:") && raw["source"].str != installSpec))
-    val installVersion get() = raw["installTarget"]["version"].str
-    val rows get() = raw["rows"].arr.orEmpty()
-}
-fun managedBundles(value: JsonElement): List<ManagedBundle> = (value as? JsonArray ?: error("Invalid bundle catalog")).map { ManagedBundle(it as? JsonObject ?: error("Invalid bundle")) }
-
 private val recordFields = mapOf("after" to listOf("afterSeconds"), "at" to emptyList(), "every" to listOf("everySeconds"), "daily" to listOf("time", "timeZone"), "weekly" to listOf("time", "timeZone", "weekdays"), "cron" to listOf("expression", "timeZone"))
 fun scheduleExpected(entry: JsonObject): JsonObject {
     val fields = recordFields[entry["kind"].str] ?: error("Unsupported ScheduleRecord kind")

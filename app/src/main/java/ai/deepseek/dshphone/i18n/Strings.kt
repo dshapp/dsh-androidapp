@@ -237,7 +237,7 @@ object Strings {
     val archived: String get() = pick("Archived", "已归档")
     val noArchived: String get() = pick("No archived sessions", "没有已归档会话")
     val restore: String get() = pick("Restore", "恢复")
-    /** 列表底部入口与归档页标题（对齐 Mac 的 archivedSessions）。 */
+    /** 会话列表视图菜单入口与归档页标题（对齐 Mac 的 archivedSessions）。 */
     val archivedSessions: String get() = pick("Archived sessions", "已归档会话")
     /** 归档页搜索框的占位（对齐 Mac 的 searchArchivedSessions）。 */
     val searchArchivedSessions: String get() = pick("Search archived sessions", "搜索已归档会话")

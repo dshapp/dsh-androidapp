@@ -79,7 +79,6 @@ fun SessionListScreen(
     onOpenSettings: () -> Unit,
     onNewSession: () -> Unit,
     onOpenArchived: () -> Unit,
-    onOpenPlugins: () -> Unit = {},
     onOpenAutomations: () -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -325,8 +324,9 @@ fun SessionListScreen(
                             Icon(Icons.Default.FilterList, Strings.viewOptions)
                         }
                         DropdownMenu(viewMenu, { viewMenu = false }) {
-                            DropdownMenuItem(text = { Text(if (Strings.locale == ai.deepseek.dshphone.i18n.AppLocale.ZH) "插件管理" else "Plugins") }, onClick = { viewMenu = false; onOpenPlugins() })
                             DropdownMenuItem(text = { Text(if (Strings.locale == ai.deepseek.dshphone.i18n.AppLocale.ZH) "自动化任务" else "Automations") }, onClick = { viewMenu = false; onOpenAutomations() })
+                            // 归档会话已经在 `listed` 里被滤掉了，这是它们唯一的入口，与自动化任务平级放在视图菜单顶部。
+                            DropdownMenuItem(text = { Text(Strings.archivedSessions) }, onClick = { viewMenu = false; onOpenArchived() })
                             HorizontalDivider()
                             MenuSectionLabel(Strings.groupBy)
                             ChoiceItem(Strings.groupByWorkspace, Icons.Default.Folder, groupBy == "workspace") {
@@ -357,8 +357,6 @@ fun SessionListScreen(
         }
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
-            // weight 而不是 fillMaxSize：底下那一行归档入口要常驻在可视底部，
-            // 不能被一个吃满高度的兄弟把它挤出屏幕（对齐 Mac 侧栏注释「固定在这一列底部」）。
             PullToRefreshBox(
                 isRefreshing = model.refreshing,
                 onRefresh = { model.pullToRefresh() },
@@ -437,14 +435,6 @@ fun SessionListScreen(
                     )
                 }
             }
-            // 会话列表最下面：归档会话已经在 `listed` 里被滤掉了，这里是它们唯一的入口，
-            // 所以固定在这一列底部（不随列表滚动），而不是折进视图选项菜单——对齐 Mac 侧栏。
-            HorizontalDivider()
-            ListItem(
-                modifier = Modifier.clickable { onOpenArchived() },
-                leadingContent = { Icon(Icons.Default.Inventory2, null) },
-                headlineContent = { Text(Strings.archivedSessions) },
-            )
         }
     }
 

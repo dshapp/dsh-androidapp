@@ -90,7 +90,8 @@ fun ChatScreen(
     val context = LocalContext.current
     fun openFileLink(target: FileLinkTarget) {
         val path = target.path
-        if (!ImageFileType.isImage(path)) {
+        // 图片语法写的落点（target.image）不看扩展名：附件对象没有扩展名。
+        if (!target.image && !ImageFileType.isImage(path)) {
             preview = target
             return
         }

@@ -672,11 +672,12 @@ private fun inlineText(parent: Node, scope: MarkdownScope): AnnotatedString = bu
                     // 图片语法 ![alt](shot.png)：目的地是图片文件时，和文件链接一样点开
                     // 系统图片查看器——绝不用文本（alt）去冒充图片。其余情况保持原来的
                     // 斜体弱化渲染，不猜、不乱点。
+                    // 无扩展名也算（附件对象没有扩展名，见 ImageFileType.isImageDestination）。
                     val file = FileLink.parse(current.destination)
-                    if (file != null && scope.onOpenLink != null && ImageFileType.isImage(file.path)) {
+                    if (file != null && scope.onOpenLink != null && ImageFileType.isImageDestination(file.path)) {
                         pushLink(
                             LinkAnnotation.Clickable("image-link", TextLinkStyles(linkStyle)) {
-                                scope.onOpenLink?.invoke(file)
+                                scope.onOpenLink?.invoke(file.copy(image = true))
                             }
                         )
                         withStyleSpan(SpanStyle(fontStyle = FontStyle.Italic)) { walk(current.firstChild) }
@@ -728,8 +729,9 @@ private fun standaloneImages(
         when (child) {
             is Image -> {
                 val target = FileLink.parse(child.destination) ?: return null
-                if (!ImageFileType.isImage(target.path)) return null
-                out.add(child to target)
+                // 无扩展名交给解码按内容判，解不出来 InlineImage 退回 alt。
+                if (!ImageFileType.isImageDestination(target.path)) return null
+                out.add(child to target.copy(image = true))
             }
             is SoftLineBreak, is HardLineBreak -> Unit
             is MdText -> if (child.literal.isNotBlank()) return null

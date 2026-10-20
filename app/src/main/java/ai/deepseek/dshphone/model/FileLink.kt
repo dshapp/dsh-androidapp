@@ -10,7 +10,16 @@ import java.net.URLDecoder
  * 主机按会话表头取工作区根，相对路径因此由会话决定（见 DSH Web 的
  * `ui-sidebar-documentpreview/rpc.ts#hostFileOf`）。
  */
-data class FileLinkTarget(val path: String, val sessionId: String? = null)
+data class FileLinkTarget(
+    val path: String,
+    val sessionId: String? = null,
+    /**
+     * 作者用图片语法 `![alt](…)` 写的落点：打开时按图片走系统查看器，不看扩展名。
+     * 无扩展名的附件对象（`~/.dsh/attachments/v1/objects/<sha256>`）靠它才不会掉进文本预览；
+     * 普通链接 `[Makefile](…)` 仍是 false，照旧按扩展名分流。
+     */
+    val image: Boolean = false,
+)
 
 /**
  * Markdown 链接目的地到"工作区文件"的翻译。

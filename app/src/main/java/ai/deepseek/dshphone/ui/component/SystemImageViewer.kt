@@ -47,6 +47,28 @@ object SystemImageViewer {
             file.delete()
             return false
         }
+        // 无扩展名（附件对象）时按文件头补 MIME；认不出不是图片，不往查看器送。
+        val mimeType = if (ImageFileType.extensionOf(workspacePath).isEmpty()) {
+            val head = runCatching {
+                // 不用 readNBytes：那是 API 33 才有的。
+                file.inputStream().use { input ->
+                    val buffer = ByteArray(ImageFileType.SNIFF_BYTES)
+                    var read = 0
+                    while (read < buffer.size) {
+                        val n = input.read(buffer, read, buffer.size - read)
+                        if (n < 0) break
+                        read += n
+                    }
+                    buffer.copyOf(read)
+                }
+            }.getOrNull()
+            head?.let(ImageFileType::sniffMimeType) ?: run {
+                file.delete()
+                return false
+            }
+        } else {
+            ImageFileType.mimeTypeOf(workspacePath)
+        }
         val authority = context.packageName + ".fileprovider"
         val uri = try {
             FileProvider.getUriForFile(context, authority, file)
@@ -56,7 +78,7 @@ object SystemImageViewer {
             return false
         }
         val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, ImageFileType.mimeTypeOf(workspacePath))
+            setDataAndType(uri, mimeType)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }

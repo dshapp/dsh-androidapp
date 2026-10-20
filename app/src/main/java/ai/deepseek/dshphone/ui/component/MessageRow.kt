@@ -1,10 +1,12 @@
 package ai.deepseek.dshphone.ui.component
 
+import ai.deepseek.dshphone.i18n.ManagementStrings
 import ai.deepseek.dshphone.i18n.Strings
 import ai.deepseek.dshphone.i18n.fmt
 import ai.deepseek.dshphone.model.*
 import ai.deepseek.dshphone.net.SessionId
 import ai.deepseek.dshphone.net.get
+import ai.deepseek.dshphone.net.managementRpc
 import ai.deepseek.dshphone.net.str
 import ai.deepseek.dshphone.state.PhoneModel
 import ai.deepseek.dshphone.state.SessionStore
@@ -76,7 +78,7 @@ fun MessageRow(
     when (node) {
         is ChatNode.User -> UserBubble(node.content, sessionId, model, onOpenSession, findQuery, findActive)
         is ChatNode.Steering -> UserBubble(node.content, sessionId, model, onOpenSession, findQuery, findActive)
-        is ChatNode.TurnTrigger -> TurnTriggerRow(node.data)
+        is ChatNode.TurnTrigger -> TurnTriggerRow(node.data, sessionId, model, onOpenSession, findQuery, findActive)
         is ChatNode.Assistant ->
             AssistantRow(node.step, sessionId, model, store, onOpenFile, onOpenLink, findQuery, findActive)
         is ChatNode.Tool -> ToolCard(node.data, cwd, findQuery, findActive, sessionId, model)
@@ -104,6 +106,8 @@ private fun UserBubble(
     onOpenSession: (SessionId) -> Unit,
     findQuery: String = "",
     findActive: Boolean = false,
+    /** 定时任务送达的消息：气泡上方加一行来源标签，点开看任务详情。 */
+    trigger: TurnTriggerNode? = null,
 ) {
     val fullText = plainText(content)
     // 圈选元素发来的 picker XML 显示成属性卡片（对齐 Mac / Chrome 插件）；
@@ -125,6 +129,7 @@ private fun UserBubble(
         horizontalAlignment = Alignment.End,
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        if (trigger != null) ScheduleTriggerLabel(trigger, sessionId, model)
         ImageGallery(images, sessionId, model, alignEnd = true)
         files.forEach { MessageFileCard(it) }
         if (cards != null) {
@@ -430,12 +435,28 @@ private fun AssistantRow(
     }
 }
 
-/** 轮次触发通知：谁唤醒了这一轮（定时任务、后台任务、插件……），正文在详情里看。 */
+/**
+ * 轮次触发通知：谁唤醒了这一轮（定时任务、后台任务、插件……），正文在详情里看。
+ * 定时任务是用户自己写的指令晚些送达，读得出提醒时直接画成用户气泡。
+ */
 @Composable
-private fun TurnTriggerRow(data: TurnTriggerNode) {
+private fun TurnTriggerRow(
+    data: TurnTriggerNode,
+    sessionId: SessionId,
+    model: PhoneModel,
+    onOpenSession: (SessionId) -> Unit,
+    findQuery: String,
+    findActive: Boolean,
+) {
     val reply = remember(data) { data.questionReply }
     if (reply != null) {
         QuestionReplyRow(reply)
+        return
+    }
+    val reminders = remember(data) { data.scheduleReminders }
+    if (reminders.isNotEmpty()) {
+        val content = remember(reminders) { listOf(ContentBlock.Text(reminders.joinToString("\n\n") { it.prompt })) }
+        UserBubble(content, sessionId, model, onOpenSession, findQuery, findActive, trigger = data)
         return
     }
     var detail by remember { mutableStateOf(false) }
@@ -454,6 +475,69 @@ private fun TurnTriggerRow(data: TurnTriggerNode) {
                 SelectionText(text)
             }
         }
+    }
+}
+
+/** 定时任务气泡上方的来源标签「🕘 自动化任务」：点开弹层看任务名称、计划时间、运行时间与内容。 */
+@Composable
+private fun ScheduleTriggerLabel(data: TurnTriggerNode, sessionId: SessionId, model: PhoneModel) {
+    var detail by remember { mutableStateOf(false) }
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .clickable { detail = true }
+            .padding(horizontal = 4.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Icon(Icons.Default.Schedule, null, Modifier.size(14.dp), tint = DshChrome.label)
+        Text(Strings.turnTriggerSchedule, style = MaterialTheme.typography.labelMedium, color = DshChrome.label)
+    }
+    if (detail) ScheduleTriggerDialog(data, sessionId, model) { detail = false }
+}
+
+/** 定时任务详情：逐条提醒列出自动化任务名称、计划时间、运行时间、任务内容与任务 ID（Mac 规则页同一组字段）。 */
+@Composable
+private fun ScheduleTriggerDialog(data: TurnTriggerNode, sessionId: SessionId, model: PhoneModel, onDismiss: () -> Unit) {
+    val reminders = remember(data) { data.scheduleReminders }
+    // 任务名称与频率要按 schedule_id 去任务目录里查；查不到就只显示 ID、不显示运行时间。
+    var tasks by remember { mutableStateOf<List<ManagedAutomation>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        val api = model.managementApi ?: return@LaunchedEffect
+        tasks = try {
+            api.managementRpc().catalog()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+    CardDetailDialog(
+        Icons.Default.Schedule,
+        Strings.turnTriggerSchedule,
+        reminders.joinToString("\n\n") { it.prompt },
+        onDismiss,
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            reminders.forEachIndexed { index, reminder ->
+                if (index > 0) HorizontalDivider()
+                val task = tasks.firstOrNull { it.id == reminder.scheduleId && it.sessionId == sessionId }
+                    ?: tasks.firstOrNull { it.id == reminder.scheduleId }
+                ScheduleField(ManagementStrings.taskName) { SelectionText(task?.title?.takeIf { it.isNotBlank() } ?: reminder.scheduleId) }
+                ScheduleField(ManagementStrings.occurrence) { SelectionText(localTime(reminder.occurrenceAt)) }
+                if (task != null) ScheduleField(ManagementStrings.runTime) { SelectionText(ManagementStrings.frequency(task.raw)) }
+                ScheduleField(ManagementStrings.instruction) { SelectionText(reminder.prompt) }
+                ScheduleField(ManagementStrings.taskId) { SelectionText(reminder.scheduleId, mono = true) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ScheduleField(label: String, value: @Composable () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        value()
     }
 }
 

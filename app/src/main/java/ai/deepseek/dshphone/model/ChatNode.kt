@@ -250,7 +250,7 @@ data class WorkflowRunData(
 
 /**
  * 唤醒这一轮的非人类消息（web `turn-trigger`）：定时任务、后台任务结束、插件、goal 续跑、
- * webhook……单独画成一行折叠通知；其余非人类上下文一律不进聊天。
+ * webhook……单独画成一行通知、点开看详情；能读出提醒的定时任务画成用户气泡。其余非人类上下文一律不进聊天。
  */
 data class TurnTriggerNode(
     val seq: Int,
@@ -293,7 +293,35 @@ data class TurnTriggerNode(
                 QuestionReplyPair(question["question"].str.orEmpty(), values)
             }
         }
+
+    /**
+     * 定时任务批次送达的提醒：读正文里 `reminders_json:` 那一行的 JSON 数组；
+     * 别的触发或解析不出时为空。
+     */
+    val scheduleReminders: List<ScheduleReminder>
+        get() {
+            if (source["kind"].str != "schedule") return emptyList()
+            for (block in content) {
+                val text = (block as? ContentBlock.Text)?.text ?: continue
+                for (line in text.lineSequence()) {
+                    if (!line.startsWith(REMINDERS_PREFIX)) continue
+                    val list = runCatching { DshJson.parseToJsonElement(line.removePrefix(REMINDERS_PREFIX).trim()) }.getOrNull().arr
+                        ?: continue
+                    val reminders = list.mapNotNull { item ->
+                        val prompt = item["reminder_prompt"].str ?: return@mapNotNull null
+                        ScheduleReminder(item["schedule_id"].str.orEmpty(), item["occurrence_at"].str.orEmpty(), prompt)
+                    }
+                    if (reminders.isNotEmpty()) return reminders
+                }
+            }
+            return emptyList()
+        }
 }
+
+private const val REMINDERS_PREFIX = "reminders_json:"
+
+/** 定时任务批次里的一条提醒：任务 ID、计划时间（UTC 时间戳）与用户写的任务内容。 */
+data class ScheduleReminder(val scheduleId: String, val occurrenceAt: String, val prompt: String)
 
 /** 一道题和它的答案：选中的选项加自填文字；跳过时为空。 */
 data class QuestionReplyPair(val question: String, val answers: List<String>)
@@ -468,7 +496,9 @@ val ChatNode.turnNumber: Int?
 fun chatNodeSearchText(node: ChatNode): String = when (node) {
     is ChatNode.User -> plainText(node.content)
     is ChatNode.Steering -> plainText(node.content)
-    is ChatNode.TurnTrigger -> plainText(node.data.content)
+    // 定时任务画成用户气泡，查找也按气泡里的任务内容来。
+    is ChatNode.TurnTrigger -> node.data.scheduleReminders.takeIf { it.isNotEmpty() }
+        ?.joinToString("\n\n") { it.prompt } ?: plainText(node.data.content)
     is ChatNode.Assistant -> node.step.blocks.mapNotNull { block ->
         when (block) {
             is AssistantBlock.Text -> block.text

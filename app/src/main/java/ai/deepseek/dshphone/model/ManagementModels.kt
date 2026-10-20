@@ -2,8 +2,10 @@ package ai.deepseek.dshphone.model
 
 import ai.deepseek.dshphone.net.*
 import kotlinx.serialization.json.*
+import java.time.Instant
 import java.time.LocalTime
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 /** Raw objects retain future Host fields; optimistic writes use only the exact ScheduleRecord. */
 private val recordFields = mapOf("after" to listOf("afterSeconds"), "at" to emptyList(), "every" to listOf("everySeconds"), "daily" to listOf("time", "timeZone"), "weekly" to listOf("time", "timeZone", "weekdays"), "cron" to listOf("expression", "timeZone"))
@@ -18,6 +20,12 @@ data class ManagedAutomation(val raw: JsonObject) {
     val active get() = raw["status"].str == "active"
     val key get() = sessionId + ":" + id
 }
+private val localTimeFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+
+/** 主机给的是 UTC 时间戳，按手机本地时区显示；解析不了就原样给出。 */
+fun localTime(raw: String): String =
+    runCatching { Instant.parse(raw).atZone(ZoneId.systemDefault()).format(localTimeFormat) }.getOrDefault(raw)
+
 fun managedAutomations(value: JsonElement): List<ManagedAutomation> = (value as? JsonArray ?: error("Invalid automation catalog")).map { ManagedAutomation(it as? JsonObject ?: error("Invalid automation")) }
 
 /** Snapshot is immutable: broadcasts/conflicts must not replace the original expected record. */

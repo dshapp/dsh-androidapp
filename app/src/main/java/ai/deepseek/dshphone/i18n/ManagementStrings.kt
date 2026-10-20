@@ -1,5 +1,11 @@
 package ai.deepseek.dshphone.i18n
 
+import ai.deepseek.dshphone.net.arr
+import ai.deepseek.dshphone.net.get
+import ai.deepseek.dshphone.net.str
+import ai.deepseek.dshphone.net.text as jsonText
+import kotlinx.serialization.json.JsonObject
+
 /** Uses the existing observable locale; deliberately no edits to shared Strings. */
 object ManagementStrings {
     fun text(en: String, zh: String) = if (Strings.locale == AppLocale.EN) en else zh
@@ -34,6 +40,39 @@ object ManagementStrings {
         null -> ""
         else -> text("Ended", "已结束") + " ($status)"
     }
+    // 定时任务消息的详情弹层（Mac 自动化任务「规则」页的字段）。
+    val taskName get() = text("Automation task name", "自动化任务名称")
+    val occurrence get() = text("Scheduled time", "计划时间")
+    val runTime get() = text("Run time", "运行时间")
+    val instruction get() = text("Automation task instruction", "自动化任务内容")
+    val taskId get() = text("Task ID", "任务 ID")
+
+    /** 规则的频率文本（Mac `ScheduleFormat.frequency` 的简版）：时区与手机相同时不写时区。 */
+    fun frequency(record: JsonObject): String {
+        val zone = record["timeZone"].str
+        val suffix = if (zone == null || zone == java.time.ZoneId.systemDefault().id) "" else text(" ($zone)", "（$zone）")
+        val time = record["time"].str.orEmpty().substringBefore('.').let { if (it.length == 8 && it.endsWith(":00")) it.dropLast(3) else it }
+        return when (record["kind"].str) {
+            "every" -> {
+                val seconds = record["everySeconds"].jsonText?.toLongOrNull() ?: 0L
+                val (size, en, zh) = listOf(Triple(86400L, "day", "天"), Triple(3600L, "hour", "小时"), Triple(60L, "minute", "分钟"))
+                    .firstOrNull { seconds > 0 && seconds % it.first == 0L } ?: Triple(1L, "second", "秒")
+                val value = seconds / size
+                text("Every $value " + (if (value == 1L) en else en + "s"), "每 $value $zh")
+            }
+            "daily" -> text("Daily at $time", "每天 $time") + suffix
+            "weekly" -> {
+                val days = record["weekdays"].arr.orEmpty().mapNotNull { it.jsonText?.toIntOrNull()?.takeIf { d -> d in 1..7 } }
+                val names = days.joinToString(text(", ", "、")) {
+                    text(listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")[it - 1], listOf("一", "二", "三", "四", "五", "六", "日")[it - 1])
+                }
+                text("Weekly on $names at $time", "每周$names $time") + suffix
+            }
+            "cron" -> "Cron " + record["expression"].str.orEmpty() + suffix
+            else -> text("Once", "仅一次")
+        }
+    }
+
     /** 新建自动化任务时预填进新会话输入框的开头（Mac `automationsNewDraft`）。 */
     val newTaskDraft get() = text("Help me create a scheduled task that runs every day at 9 AM:", "帮我创建一个每天早上9点执行的定时任务:")
     val cancel get() = text("Cancel", "取消")

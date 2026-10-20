@@ -38,9 +38,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
-import java.time.Instant
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
 
 /**
  * 自动化任务页：与归档页、设置页同一套原生写法。
@@ -398,12 +395,6 @@ private fun Hint(text: String, error: Boolean = false) {
         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
     )
 }
-
-private val timeFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
-
-/** 主机给的是 UTC 时间戳，列表里按手机本地时区显示；解析不了就原样给出。 */
-private fun localTime(raw: String): String =
-    runCatching { Instant.parse(raw).atZone(ZoneId.systemDefault()).format(timeFormat) }.getOrDefault(raw)
 
 @Composable
 private fun ManagementField(label: String, value: String, enabled: Boolean, change: (String) -> Unit) {

@@ -21,7 +21,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
@@ -41,6 +46,8 @@ import kotlinx.serialization.json.JsonPrimitive
  *
  * 卡片族（工具、思考、提示行）共用这一套最小行高与字号（Mac/iOS `chromeRowHeight` 18）。
  * [running] 时图标槽仍是卡片自己的图标，图标与摘要一起呼吸（[breathing]）即运行态。
+ * [streaming] 时摘要占满剩余宽度、放不下直接裁掉，右侧 48dp 渐隐代替省略号（Web
+ * `summary[data-streaming]`）：表示还在写。
  */
 @Composable
 fun CardRow(
@@ -50,6 +57,7 @@ fun CardRow(
     suffix: String? = null,
     tint: Color = DshChrome.label,
     running: Boolean = false,
+    streaming: Boolean = false,
     onClick: (() -> Unit)? = null,
     /** 会话内查找的查询词；命中词在摘要里逐字高亮。 */
     findQuery: String = "",
@@ -84,8 +92,9 @@ fun CardRow(
                 style = MaterialTheme.typography.labelMedium,
                 color = tint,
                 maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
+                softWrap = !streaming,
+                overflow = if (streaming) TextOverflow.Clip else TextOverflow.Ellipsis,
+                modifier = if (streaming) Modifier.weight(1f).trailingFade() else Modifier.weight(1f, fill = false),
             )
             if (suffix != null) {
                 Text(
@@ -98,6 +107,17 @@ fun CardRow(
         }
     }
 }
+
+/** 右侧 48dp 从不透明渐变到透明的遮罩。 */
+private fun Modifier.trailingFade(): Modifier = this
+    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+    .drawWithContent {
+        drawContent()
+        drawRect(
+            Brush.horizontalGradient(listOf(Color.Black, Color.Transparent), startX = size.width - 48.dp.toPx(), endX = size.width),
+            blendMode = BlendMode.DstIn,
+        )
+    }
 
 /** 详情弹层的统一外壳：图标 + 标题 + 复制 + 完成，正文可滚动。 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -147,7 +167,10 @@ fun CardDetailDialog(
     }
 }
 
-/** 思考卡片：行上只显示第一行，全文在弹层里看。 */
+/**
+ * 思考卡片：行上只显示一行摘要，全文在弹层里看。摘要规则同 Web `ReasoningRow`：
+ * 结束后是第一行；思考中跟着进度走，取最新一段已写完的首行（还没有就先显示正在写的第一行）。
+ */
 @Composable
 fun ThinkCard(
     text: String,
@@ -157,14 +180,15 @@ fun ThinkCard(
     running: Boolean = false,
 ) {
     var detail by remember { mutableStateOf(false) }
-    val summary = remember(text) {
-        val line = text.trimStart().substringBefore('\n').trim()
-        line.ifEmpty { Strings.thinking }
+    val summary = remember(text, running) {
+        val line = (if (running) latestParagraphLead(text) else null) ?: text.trimStart().substringBefore('\n').trim()
+        line.replace("**", "").ifEmpty { Strings.thinking }
     }
     CardRow(
         Icons.Outlined.Psychology,
         summary,
         running = running,
+        streaming = running,
         onClick = { detail = true },
         findQuery = findQuery,
         findActive = findActive,
@@ -174,6 +198,22 @@ fun ThinkCard(
             SelectionText(text)
         }
     }
+}
+
+/** 最新一段的首行，且这一行已写完（后面出现过换行）；段落以空白行分隔（Web `latestCompletedParagraphFirstLine`）。 */
+private fun latestParagraphLead(text: String): String? {
+    var lead: String? = null
+    var paragraphStart = true
+    // 最后一片是还在写的行，不算。
+    for (line in text.split('\n').dropLast(1)) {
+        val trimmed = line.trim()
+        if (trimmed.isEmpty()) paragraphStart = true
+        else if (paragraphStart) {
+            lead = trimmed
+            paragraphStart = false
+        }
+    }
+    return lead
 }
 
 @Composable

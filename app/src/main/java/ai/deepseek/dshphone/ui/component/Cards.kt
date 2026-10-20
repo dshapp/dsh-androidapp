@@ -36,6 +36,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.compose.ui.platform.LocalView
+import android.os.Build
+import android.view.WindowManager
+import androidx.compose.ui.graphics.luminance
+import androidx.core.view.WindowCompat
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -130,7 +136,32 @@ fun CardDetailDialog(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val clipboard = LocalClipboardManager.current
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    // 弹层要真正铺满全屏，系统栏 insets 交给 Scaffold 处理。默认情况下系统把弹层窗口
+    // 夹在状态栏和手势条之间，Compose 却按整屏高度排版，正文底部（如子调用列表）
+    // 会被裁掉、滚不出来（小米 14 实测差 182px）。
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+    ) {
+        val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
+        val dialogView = LocalView.current
+        val lightBars = MaterialTheme.colorScheme.surface.luminance() > 0.5f
+        SideEffect {
+            if (dialogWindow != null) {
+                // 铺进状态栏后，系统栏图标颜色要跟弹层底色走，否则浅色底上是白字看不见。
+                WindowCompat.getInsetsController(dialogWindow, dialogView).apply {
+                    isAppearanceLightStatusBars = lightBars
+                    isAppearanceLightNavigationBars = lightBars
+                }
+            }
+            if (dialogWindow != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                dialogWindow.attributes = dialogWindow.attributes.apply {
+                    fitInsetsTypes = 0
+                    // 刘海区也要铺进去，否则窗口顶边仍被压到状态栏下方。
+                    layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                }
+            }
+        }
         Surface(Modifier.fillMaxSize()) {
             Scaffold(
                 topBar = {
@@ -160,8 +191,10 @@ fun CardDetailDialog(
                         .fillMaxSize()
                         .verticalScroll(rememberScrollState())
                         .padding(Dimens.columnInset),
-                    content = content,
-                )
+                ) {
+                    content()
+                    Spacer(Modifier.height(24.dp))
+                }
             }
         }
     }
@@ -426,8 +459,11 @@ fun toolVariantIcon(variant: ToolRowVariant): ImageVector = when (variant) {
  *
  * 两层协议在这里落地：
  *  - read_image 的卡身就是那张图（Web 的 tool.call.images 槽位，imageCardModel）；
- *  - run_code 里派发的子调用（tool/ptc-dispatch*）按 Web 的工具树缩进一层挂在父行下面，
- *    子调用自己的 read_image 图片同样画在自己的卡身里。
+ *  - run_code 里派发的子调用（tool/ptc-dispatch*）对齐 Mac：聊天记录里只画外层那一行，
+ *    子调用不在行下展开（一次 Code Mode 往往派发几十个，铺开后细节太多）；
+ *    点开详情弹层，在输入/输出后面列「子调用(N)」，每个子调用是一行可再点开的卡片。
+ *
+ * [headerOnly] 为 true 时只画这一行（详情弹层里的子调用行），不带 read_image 卡身。
  */
 @Composable
 fun ToolCard(
@@ -438,6 +474,7 @@ fun ToolCard(
     sessionId: SessionId? = null,
     model: PhoneModel? = null,
     depth: Int = 0,
+    headerOnly: Boolean = false,
 ) {
     var detail by remember(data.callId) { mutableStateOf(false) }
     val rowModel = remember(data, cwd) { toolRowModel(data, cwd) }
@@ -464,15 +501,8 @@ fun ToolCard(
             findQuery = findQuery,
             findActive = findActive,
         )
-        if (imageCard != null && sessionId != null && model != null) {
+        if (!headerOnly && imageCard != null && sessionId != null && model != null) {
             ToolImageCard(imageCard, sessionId, model)
-        }
-        if (depth < 8) {
-            data.subCalls.forEach { child ->
-                Box(Modifier.padding(start = 18.dp)) {
-                    ToolCard(child, cwd, findQuery, findActive, sessionId, model, depth + 1)
-                }
-            }
         }
     }
     if (detail && !data.preparing) {
@@ -489,13 +519,16 @@ fun ToolCard(
                 Spacer(Modifier.height(16.dp))
                 DetailSection(Strings.toolOutput) { ToolResultView(result, sessionId, model) }
             }
-            if (depth < 8) {
+            if (data.subCalls.isNotEmpty() && depth < 64) {
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    Strings.subcalls(data.subCalls.size),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(4.dp))
                 data.subCalls.forEach { child ->
-                    Spacer(Modifier.height(16.dp))
-                    DetailSection(child.name) {
-                        if (child.argsRaw.isNotEmpty()) MonospaceBlock(prettyJson(child.argsRaw))
-                        child.result?.let { sub -> ToolResultView(sub, sessionId, model) }
-                    }
+                    ToolCard(child, cwd, sessionId = sessionId, model = model, depth = depth + 1, headerOnly = true)
                 }
             }
         }

@@ -77,6 +77,8 @@ object Strings {
     val noWorkspace: String get() = pick("No workspace", "不指定工作区")
     val toolInput: String get() = pick("Input", "输入")
     val toolOutput: String get() = pick("Output", "输出")
+    /** 详情弹层里 run_code 派发的子调用列表标题（Mac `subcalls`）。 */
+    fun subcalls(count: Int): String = pick("Subcalls ($count)", "子调用($count)")
     val thinking: String get() = pick("Thinking", "思考过程")
     // 运行状态条的工作类别（Mac `liveActivity` / web `message.stepProcess.*`）。
     val activityThinking: String get() = pick("Analyzing the request", "正在分析请求")

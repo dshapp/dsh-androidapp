@@ -191,6 +191,9 @@ object Strings {
     val imageTypeUnsupported: String get() = pick("%s is not an accepted image type.", "不支持的图片类型：%s。")
     // 图片块在日志里存在、字节却读不到（未被会话引用或已被清理）：明说，别一直转圈。
     val imageUnavailable: String get() = pick("Image unavailable", "图片不可用")
+    // 圈选元素 XML 的卡片（与 Mac xmlCardsViewAll / xmlCardText、插件 xmlCards.viewAll 同文案）。
+    val xmlCardsViewAll: String get() = pick("View all %d elements", "查看全部 %d 个元素")
+    val xmlCardText: String get() = pick("text", "文本")
     val accessRead: String get() = pick("Read", "只读")
     val accessWrite: String get() = pick("Write", "写入")
     val accessFull: String get() = pick("Full", "完全")

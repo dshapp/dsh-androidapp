@@ -97,13 +97,19 @@ private fun UserBubble(
     findQuery: String = "",
     findActive: Boolean = false,
 ) {
-    val text = plainText(content)
+    val fullText = plainText(content)
+    // 圈选元素发来的 picker XML 显示成属性卡片（对齐 Mac / Chrome 插件）；
+    // XML 之后的 [指令] 原话仍旧走普通气泡。
+    val cards = remember(fullText) { XmlMessageCards.parse(fullText) }
+    val text = cards?.remainder ?: fullText
     val images = lenientImageRefs(content)
     val files = fileAttachmentRefs(content)
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         // 气泡最多占列宽的 82%，但短消息只占自己需要的宽度——
         // 旧写法是固定占比，一句「好」也会被拉成横贯半屏的长条。
         val bubbleMaxWidth = maxWidth * 0.82f
+        // 卡片不是原话，可以比气泡宽一些（插件里卡片最宽到整列）。
+        val cardMaxWidth = maxWidth * 0.92f
     Column(
         Modifier
             .fillMaxWidth()
@@ -113,6 +119,9 @@ private fun UserBubble(
     ) {
         ImageGallery(images, sessionId, model, alignEnd = true)
         files.forEach { MessageFileCard(it) }
+        if (cards != null) {
+            XmlMessageCardStack(cards, fullText, cardMaxWidth, findQuery, findActive)
+        }
         // 只发文件/图片时没有文字，不画空气泡。
         if (text.isNotEmpty()) {
             // 点气泡弹出「复制」小泡泡，一键复制整句；长按仍走系统文本选择。

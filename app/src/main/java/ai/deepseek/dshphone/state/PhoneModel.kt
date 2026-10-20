@@ -1519,6 +1519,23 @@ class PhoneModel private constructor(app: Application) {
         }
     }
 
+    /**
+     * 把一张会话附件的原始字节写到 [target]，交给系统图片查看器放大查看。
+     *
+     * 用原始字节而不是转写里那张位图：重新编码会丢画质、改格式，查看器里放大就看不清了。
+     * 取不到（断线、附件已被清理、不是合法 base64）返回 false，由调用方提示。
+     */
+    suspend fun attachmentImageFile(sessionId: SessionId, ref: ImageAttachmentRef, target: File): Boolean {
+        val client = api ?: return false
+        return withContext(Dispatchers.IO) {
+            val value = runCatching { client.sessionAttachment(sessionId, ref.attachmentId) }.getOrNull()
+                ?: return@withContext false
+            val bytes = runCatching { Base64.decode(value.data, Base64.DEFAULT) }.getOrNull()
+            if (bytes == null || bytes.isEmpty()) return@withContext false
+            runCatching { target.writeBytes(bytes) }.isSuccess
+        }
+    }
+
     /** 导出会话日志到缓存文件，交给系统分享。 */
     fun exportSessionLog(sessionId: SessionId): File? {
         val store = sessions[sessionId] ?: return null

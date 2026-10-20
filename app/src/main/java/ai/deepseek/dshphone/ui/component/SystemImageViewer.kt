@@ -28,6 +28,15 @@ object SystemImageViewer {
     const val MAX_BYTES = 64L * 1024 * 1024
 
     /**
+     * 会话附件落缓存时用的「路径」：交给 [stageFile] 与 [open]。
+     *
+     * 故意不带扩展名，让 [open] 按文件头认类型：附件名的扩展名不可信（粘贴的图叫
+     * pasted-image-1.png，实际字节却是 webp），按名字报 MIME 可能让查看器打不开。
+     */
+    fun attachmentPath(attachmentId: String): String =
+        "attachment-" + attachmentId.substringAfter(':').take(16)
+
+    /**
      * 申请一个准备接收图片的缓存文件：调用方把字节写进去（可分片追加），写完再交给 [open]。
      * 先落地再打开，是为了不必把整张图同时握在内存里。
      */

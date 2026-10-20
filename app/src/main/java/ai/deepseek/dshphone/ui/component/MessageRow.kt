@@ -41,6 +41,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
@@ -244,6 +245,9 @@ private fun middleTruncate(name: String, max: Int): String {
  *
  * 尺寸按附件自己声明的 width/height 收在 [IMAGE_MAX_WIDTH]/[IMAGE_MAX_HEIGHT] 以内，
  * 声明缺失（0）时退回固定上限；取不到字节时给一个明确的失败占位，而不是一直转圈。
+ *
+ * 点一下交给系统自带的图片查看器（与正文里的图片链接同一条通路，见 [SystemImageViewer]）：
+ * 双指放大、拖动由系统查看器负责。用户发送的图、助手回复的图、工具结果图都走这里。
  */
 @Composable
 fun AttachmentImage(
@@ -255,7 +259,10 @@ fun AttachmentImage(
 ) {
     var bitmap by remember(ref.attachmentId) { mutableStateOf<android.graphics.Bitmap?>(null) }
     var loaded by remember(ref.attachmentId) { mutableStateOf(false) }
-    var full by remember { mutableStateOf(false) }
+    // 正在取原图交给系统查看器：防止连点起多个查看器。
+    var opening by remember(ref.attachmentId) { mutableStateOf(false) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     LaunchedEffect(ref.attachmentId) {
         bitmap = model.attachmentImage(sessionId, ref)
         loaded = true
@@ -269,14 +276,26 @@ fun AttachmentImage(
                 .widthIn(max = if (compact) IMAGE_COMPACT_MAX_WIDTH else IMAGE_MAX_WIDTH)
                 .heightIn(max = if (compact) IMAGE_COMPACT_MAX_HEIGHT else IMAGE_MAX_HEIGHT)
                 .clip(RoundedCornerShape(10.dp))
-                .clickable { full = true },
+                .clickable(enabled = !opening) {
+                    opening = true
+                    scope.launch {
+                        try {
+                            // 先把原始字节落到缓存，再用 ACTION_VIEW 起系统图片查看器。
+                            val path = SystemImageViewer.attachmentPath(ref.attachmentId)
+                            val file = SystemImageViewer.stageFile(context, path)
+                            val staged = model.attachmentImageFile(sessionId, ref, file)
+                            if (!staged) file.delete()
+                            val opened = staged && SystemImageViewer.open(context, path, file)
+                            if (!opened) {
+                                android.widget.Toast.makeText(context, Strings.imageOpenFailed, android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        } finally {
+                            opening = false
+                        }
+                    }
+                },
             contentScale = ContentScale.Fit,
         )
-        if (full) {
-            CardDetailDialog(Icons.Default.Image, ref.name ?: "", null, { full = false }) {
-                Image(image.asImageBitmap(), contentDescription = ref.name, modifier = Modifier.fillMaxWidth())
-            }
-        }
     } else {
         Box(
             Modifier

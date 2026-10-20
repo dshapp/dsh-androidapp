@@ -57,6 +57,19 @@ class StagedImageFileNameTest {
         assertTrue(stagedImageFileName("/w/a/").isNotBlank())
     }
 
+    /**
+     * 会话附件交给系统查看器时不带扩展名：附件名的扩展名不可信（pasted-image-1.png 实为 webp），
+     * 由 SystemImageViewer.open 按文件头认类型。不同附件不能落到同一个缓存文件上。
+     */
+    @Test
+    fun attachmentPathHasNoExtensionAndDiffersPerAttachment() {
+        val a = SystemImageViewer.attachmentPath("sha256:7f7e8c63529ddb3fa05514fddc98dedef2feee48162a24808a00f9c241e708ce")
+        val b = SystemImageViewer.attachmentPath("sha256:e353c92d2763bf36b08bb8ac12c08846e3cb5d162e82a14fc9d4842d51602627")
+        assertEquals("", ai.deepseek.dshphone.model.ImageFileType.extensionOf(a))
+        assertFalse(a, a.contains(":"))
+        assertNotEquals(stagedImageFileName(a), stagedImageFileName(b))
+    }
+
     @Test
     fun staysShortEnoughForAnyFilesystem() {
         val name = stagedImageFileName("/w/a/" + "x".repeat(500) + ".png")

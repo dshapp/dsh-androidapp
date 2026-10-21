@@ -262,6 +262,9 @@ object Strings {
     val changedFilesOversized: String get() = pick("too large", "过大")
     val changedDiffBinary: String get() = pick("Binary file; changes cannot be shown", "二进制文件，无法显示改动")
     val changedDiffOversized: String get() = pick("File too large; changes cannot be shown", "文件过大，无法显示改动")
+    /** 改动文件弹窗里的二进制图片已从磁盘消失（对齐 Mac changesFileMissing）。 */
+    val changedFileMissing: String get() = pick("File No Longer Exists", "文件已不存在")
+    val changedFileMissingDetail: String get() = pick("It was moved or deleted after this turn.", "这次修改之后，文件已被移动或删除。")
     val changedDiffUnchanged: String get() = pick("Both sides hold the same lines", "两侧内容相同")
     val changedDiffCoarse: String get() =
         pick("Line comparison timed out; shown as a whole-file replacement", "逐行对比超时，按整个文件替换显示")

@@ -92,6 +92,13 @@ data class TriggerToken(val kind: Kind, val query: String, val start: Int, val e
  *
  * `get` 只由 [DshApplication] 持有实例，是这条替换唯一的入口。
  */
+/** [PhoneModel.workspaceImageLoad] 的结果：解出的图、主机报告不存在、或其他读不到/解不了。 */
+sealed interface WorkspaceImageLoad {
+    data class Loaded(val bitmap: Bitmap) : WorkspaceImageLoad
+    data object Missing : WorkspaceImageLoad
+    data object Unavailable : WorkspaceImageLoad
+}
+
 /** 与主机 workspaceFiles 的 maxBytes 默认值一致；超过会被拒，不会被截短。 */
 internal const val CHUNK_BYTES = 2 * 1024 * 1024
 
@@ -1456,6 +1463,8 @@ class PhoneModel private constructor(app: Application) {
     }
     /** 读过但失败的「会话|路径」：同一屏重组时不必反复向主机要一张打不开的图。 */
     private val workspaceImageFailures = mutableSetOf<String>()
+    /** 失败里主机明确报告「不存在」的那部分（[workspaceImageFailures] 的子集）。 */
+    private val workspaceImageMissing = mutableSetOf<String>()
 
     /**
      * 助手正文里 `![](/abs/shot.png)` 这类本地路径图片的位图（对齐 Web `localPathMediaUrl`
@@ -1468,11 +1477,20 @@ class PhoneModel private constructor(app: Application) {
      *
      * @return 解码好的位图；读不到、太大或不是能解的图片时为 null。
      */
-    suspend fun workspaceImage(sessionId: SessionId, path: String): Bitmap? {
+    suspend fun workspaceImage(sessionId: SessionId, path: String): Bitmap? =
+        (workspaceImageLoad(sessionId, path) as? WorkspaceImageLoad.Loaded)?.bitmap
+
+    /** [workspaceImage] 的变体：失败时多区分出「主机报告文件不存在」（改动文件弹窗要画空状态）。 */
+    suspend fun workspaceImageLoad(sessionId: SessionId, path: String): WorkspaceImageLoad {
         val key = "$sessionId|$path"
-        synchronized(workspaceImageCache) { workspaceImageCache[key] }?.let { return it }
-        if (synchronized(workspaceImageFailures) { key in workspaceImageFailures }) return null
-        if (api == null) return null
+        synchronized(workspaceImageCache) { workspaceImageCache[key] }?.let { return WorkspaceImageLoad.Loaded(it) }
+        synchronized(workspaceImageFailures) {
+            if (key in workspaceImageFailures) {
+                return if (key in workspaceImageMissing) WorkspaceImageLoad.Missing else WorkspaceImageLoad.Unavailable
+            }
+        }
+        if (api == null) return WorkspaceImageLoad.Unavailable
+        var missing = false
         val staged = File(appContext.cacheDir, "inline-images").apply { mkdirs() }
             .let { File.createTempFile("img", ".bin", it) }
         val bitmap = try {
@@ -1483,16 +1501,24 @@ class PhoneModel private constructor(app: Application) {
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "inline image $path unavailable: ${e.message}")
+            missing = e is ApiException && (e.code == "workspace-file/not-found" || e.code == "FS_NOT_FOUND")
             null
         } finally {
             staged.delete()
         }
         if (bitmap == null) {
-            synchronized(workspaceImageFailures) { workspaceImageFailures.add(key) }
+            synchronized(workspaceImageFailures) {
+                workspaceImageFailures.add(key)
+                if (missing) workspaceImageMissing.add(key)
+            }
         } else {
             synchronized(workspaceImageCache) { workspaceImageCache[key] = bitmap }
         }
-        return bitmap
+        return when {
+            bitmap != null -> WorkspaceImageLoad.Loaded(bitmap)
+            missing -> WorkspaceImageLoad.Missing
+            else -> WorkspaceImageLoad.Unavailable
+        }
     }
 
     /** 先只读尺寸，再按 2 的幂降采样到长边不超过 [maxEdge]。 */

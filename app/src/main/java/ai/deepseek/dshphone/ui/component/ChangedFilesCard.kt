@@ -7,6 +7,8 @@ import ai.deepseek.dshphone.model.ChangedFileEntry
 import ai.deepseek.dshphone.model.TurnChangesAddress
 import ai.deepseek.dshphone.state.PhoneModel
 import ai.deepseek.dshphone.state.SessionStore
+import ai.deepseek.dshphone.state.WorkspaceImageLoad
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -17,11 +19,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.outlined.HelpCenter
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -171,6 +177,12 @@ private fun ChangedFileDiffDialog(
     LaunchedEffect(address, index) {
         if (index >= 0 && diff == null) model.loadTurnChangesDiff(address, index)
     }
+    // 二进制文件先按路径取图，与比较请求并行，不等比较先回（对齐 Mac）。
+    // path 在会话工作目录内是相对路径，readBytes 的会话作用域正好以该目录为根解析。
+    var image by remember(address, file) { mutableStateOf<WorkspaceImageLoad?>(null) }
+    LaunchedEffect(address, file) {
+        if (file.binary) image = model.workspaceImageLoad(address.sessionId, file.path)
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = { TextButton(onClick = onDismiss) { Text(Strings.done) } },
@@ -184,8 +196,11 @@ private fun ChangedFileDiffDialog(
             )
         },
         text = {
+            val loaded = image
             when {
-                diff == null -> Row(
+                loaded is WorkspaceImageLoad.Loaded -> ChangedImage(loaded.bitmap, file.display)
+                loaded is WorkspaceImageLoad.Missing -> FileMissing()
+                diff == null || (file.binary && loaded == null) -> Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.Center,
                 ) { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) }
@@ -195,6 +210,47 @@ private fun ChangedFileDiffDialog(
             }
         },
     )
+}
+
+/** 原始尺寸（px 当 dp，与正文内联图一致），宽度不超过弹窗，小图不放大。 */
+@Composable
+private fun ChangedImage(bitmap: android.graphics.Bitmap, description: String) {
+    Box(
+        Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        Image(
+            bitmap.asImageBitmap(),
+            contentDescription = description,
+            modifier = Modifier
+                .widthIn(max = bitmap.width.dp)
+                .fillMaxWidth()
+                .aspectRatio(bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1)),
+            contentScale = ContentScale.Fit,
+        )
+    }
+}
+
+/** 主机报告文件不存在：居中的空状态。 */
+@Composable
+private fun FileMissing() {
+    Column(
+        Modifier.fillMaxWidth().padding(vertical = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(
+            Icons.Outlined.HelpCenter, null, Modifier.size(48.dp),
+            tint = MaterialTheme.colorScheme.outline,
+        )
+        Text(Strings.changedFileMissing, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+        Text(
+            Strings.changedFileMissingDetail,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+    }
 }
 
 @Composable

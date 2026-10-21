@@ -319,6 +319,8 @@ object Strings {
     val done: String get() = pick("Done", "完成")
     val close: String get() = pick("Close", "关闭")
     val retry: String get() = pick("Retry", "重试")
+    /** Markdown 里单独成段的图片读取/解码失败（web `image.failed`），后接「 · alt」。 */
+    val imagePreviewUnavailable: String get() = pick("Image preview unavailable", "图片无法预览")
     val permissions: String get() = pick("Permissions", "权限")
     val sessionHasDraft: String get() = pick("Draft", "草稿")
     val sessionAwaitingApproval: String get() = pick("Approve", "待审批")

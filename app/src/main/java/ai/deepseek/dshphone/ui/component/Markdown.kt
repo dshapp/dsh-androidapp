@@ -756,7 +756,10 @@ private fun altText(image: Image): String {
     return builder.toString()
 }
 
-/** 就地显示一张工作区图片：加载中占位，失败退回 alt 文字；点一下交给系统查看器。 */
+/**
+ * 就地显示一张工作区图片：加载中占位；载入后点一下交给系统查看器。
+ * 读取/解码失败对齐 Web `LoadedMarkdownImage`：一段斜体弱化文字「图片无法预览 · alt」，不可点、不重试。
+ */
 @Composable
 private fun InlineImage(image: Image, target: ai.deepseek.dshphone.model.FileLinkTarget, scope: MarkdownScope) {
     val loader = scope.loadImage ?: return
@@ -766,9 +769,8 @@ private fun InlineImage(image: Image, target: ai.deepseek.dshphone.model.FileLin
         val bitmap = loader(target)
         state = if (bitmap != null) InlineImageState.Ready(bitmap) else InlineImageState.Failed
     }
-    val alt = altText(image).ifBlank { target.path.substringAfterLast('/') }
-    val open = scope.onOpenLink?.let { handler -> { handler(target) } }
-    val clickable = if (open != null) Modifier.clickable(onClick = open) else Modifier
+    // alt 为空时用作者写的原始地址（同 Web `alt || destination`）。
+    val alt = altText(image).ifBlank { image.destination }
     when (val current = state) {
         InlineImageState.Loading -> Box(
             Modifier
@@ -778,14 +780,15 @@ private fun InlineImage(image: Image, target: ai.deepseek.dshphone.model.FileLin
             contentAlignment = Alignment.Center,
         ) { CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) }
         InlineImageState.Failed -> Text(
-            alt,
-            clickable,
+            "${Strings.imagePreviewUnavailable} · $alt",
             style = bodyStyle(),
             fontStyle = FontStyle.Italic,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         is InlineImageState.Ready -> {
             val bitmap = current.bitmap
+            val open = scope.onOpenLink?.let { handler -> { handler(target) } }
+            val clickable = if (open != null) Modifier.clickable(onClick = open) else Modifier
             // 原始尺寸（Web 的 CSS px 在这里就是 dp），宽度不超过列宽。
             val natural = bitmap.width.dp
             androidx.compose.foundation.Image(

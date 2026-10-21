@@ -16,7 +16,9 @@ import ai.deepseek.dshphone.state.AutomationManagementState
 import ai.deepseek.dshphone.ui.screen.SessionListScreen
 import ai.deepseek.dshphone.i18n.Strings
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -34,11 +36,82 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 
 @Composable
-fun DshApp(model: PhoneModel, launch: LaunchRequest?, onLaunchHandled: () -> Unit = {}) {
+fun DshApp(model: PhoneModel, launch: LaunchRequest?, onLaunchHandled: () -> Unit = {}) = BoxWithConstraints(Modifier.fillMaxSize()) {
     val navController = rememberNavController()
     val api = model.managementApi
     val automationState = remember(api) { AutomationManagementState() }
     var scanning by remember { mutableStateOf(false) }
+
+    // 宽屏（平板、折叠屏展开、手机横屏）：会话列表与会话详情并排放在同一页（对齐 Mac 的
+    // 边栏 + 详情），点列表只换右侧内容，不再整页跳转。窄屏仍是列表 → 会话两页导航。
+    val windowWidth = maxWidth
+    val wide = windowWidth >= WIDE_LAYOUT_MIN_WIDTH
+    // 宽屏右侧此刻显示什么：DetailPane 编码的字符串（可存进 rememberSaveable，转屏重建不丢）。
+    var detail by rememberSaveable { mutableStateOf<String?>(null) }
+    // 新建会话页关掉时退回的那条会话：从会话 A 点「新建」又放弃，右侧应回到 A 而不是空白。
+    var detailBeforeNew by rememberSaveable { mutableStateOf<String?>(null) }
+
+    fun openChat(sessionId: String) {
+        if (wide) {
+            detail = DetailPane.chat(sessionId)
+            // 从归档页、自动化页等整页里打开会话：回到并排页，让它出现在右侧。
+            navController.popBackStack("root", inclusive = false)
+        } else {
+            navController.navigate("chat/$sessionId")
+        }
+    }
+
+    fun openNew(draftRoute: String) {
+        if (wide) {
+            if (DetailPane.chatId(detail) != null) detailBeforeNew = detail
+            detail = draftRoute
+            navController.popBackStack("root", inclusive = false)
+        } else {
+            navController.navigate(draftRoute)
+        }
+    }
+
+    // 窄 ↔ 宽切换（转屏、折叠屏开合、分屏拖动）时把"正在看的那条会话"带过去：
+    //  · 窄 → 宽：栈顶是会话页就收回并排页并在右侧选中它；栈顶是别的页（列表、设置…）
+    //    说明窄屏下没有在看会话，右侧清空，免得冒出一条很早以前选过的会话。
+    //  · 宽 → 窄：并排页右侧有会话就推一页会话页，用户眼前的内容不丢；返回键回到列表。
+    // 上一次的宽窄要存进 rememberSaveable：转屏会重建 Activity，只用 remember 的话重建后
+    // 永远是"第一次"，切换逻辑一次也跑不到。
+    var lastWide by rememberSaveable { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(wide) {
+        val previous = lastWide
+        lastWide = wide
+        if (previous == null || previous == wide) return@LaunchedEffect
+        val entry = navController.currentBackStackEntry
+        val route = entry?.destination?.route
+        if (wide) {
+            if (route == "chat/{sessionId}") {
+                val sessionId = entry.arguments?.getString("sessionId")
+                detail = sessionId?.let { DetailPane.chat(it) }
+                navController.popBackStack("root", inclusive = false)
+            } else {
+                detail = null
+            }
+        } else if (route == "root") {
+            val current = detail
+            val sessionId = DetailPane.chatId(current)
+            when {
+                sessionId != null -> navController.navigate("chat/$sessionId")
+                current == DetailPane.NEW || current == DetailPane.NEW_AUTOMATION -> navController.navigate(current)
+            }
+        }
+    }
+
+    // 宽屏右侧的会话没了（归档、主机删除）：别留着一页"会话已消失"的空壳。
+    val detailSessionId = DetailPane.chatId(detail)
+    val detailGone = detailSessionId != null && model.listStore.sessionsById.isNotEmpty() &&
+        model.listStore.sessionsById[detailSessionId] == null && model.sessions[detailSessionId] == null
+    val detailArchived = detailSessionId != null &&
+        (model.workspaceStore.archivedSessionIds.contains(detailSessionId) ||
+            model.listStore.archivedSessionIds.contains(detailSessionId))
+    LaunchedEffect(detailGone, detailArchived) {
+        if (wide && (detailGone || detailArchived)) detail = null
+    }
 
     LaunchedEffect(Unit) { model.connectCurrent() }
 
@@ -67,10 +140,16 @@ fun DshApp(model: PhoneModel, launch: LaunchRequest?, onLaunchHandled: () -> Uni
     LaunchedEffect(launch, settled) {
         val sessionId = launch?.openSessionId ?: return@LaunchedEffect
         if (!settled) return@LaunchedEffect
-        navController.navigate("chat/$sessionId") {
-            // 回退键回到会话列表：卡片是"跳到这条会话"，不是在当前这条上再叠一层。
-            popUpTo("root")
-            launchSingleTop = true
+        if (wide) {
+            // 并排页：卡片要看的会话直接放到右侧，盖在上面的整页（设置、归档…）一并收起。
+            detail = DetailPane.chat(sessionId)
+            navController.popBackStack("root", inclusive = false)
+        } else {
+            navController.navigate("chat/$sessionId") {
+                // 回退键回到会话列表：卡片是"跳到这条会话"，不是在当前这条上再叠一层。
+                popUpTo("root")
+                launchSingleTop = true
+            }
         }
         onLaunchHandled()
     }
@@ -82,12 +161,25 @@ fun DshApp(model: PhoneModel, launch: LaunchRequest?, onLaunchHandled: () -> Uni
             composable("root") {
                 if (model.profiles.profiles.isEmpty()) {
                     OnboardingScreen(onScan = { scanning = true })
+                } else if (wide) {
+                    WideSessionLayout(
+                        model = model,
+                        width = windowWidth,
+                        detail = detail,
+                        onOpenSession = { openChat(it) },
+                        onOpenSettings = { navController.navigate("settings") },
+                        onNewSession = { openNew(DetailPane.NEW) },
+                        onOpenArchived = { navController.navigate("archived") },
+                        onOpenAutomations = { navController.navigate("automations") },
+                        onCloseNew = { detail = detailBeforeNew; detailBeforeNew = null },
+                        onCreated = { detailBeforeNew = null; detail = DetailPane.chat(it) },
+                    )
                 } else {
                     SessionListScreen(
                         model = model,
-                        onOpenSession = { navController.navigate("chat/$it") },
+                        onOpenSession = { openChat(it) },
                         onOpenSettings = { navController.navigate("settings") },
-                        onNewSession = { navController.navigate("new") },
+                        onNewSession = { openNew(DetailPane.NEW) },
                         onOpenArchived = { navController.navigate("archived") },
                         onOpenAutomations = { navController.navigate("automations") },
                     )
@@ -97,7 +189,7 @@ fun DshApp(model: PhoneModel, launch: LaunchRequest?, onLaunchHandled: () -> Uni
                 if (api != null) AutomationsScreen(
                     api = api,
                     onBack = { navController.popBackStack() },
-                    onNewTask = { navController.navigate("new-automation") },
+                    onNewTask = { openNew(DetailPane.NEW_AUTOMATION) },
                     state = automationState,
                 )
                 else Text(Strings.connect)
@@ -107,7 +199,7 @@ fun DshApp(model: PhoneModel, launch: LaunchRequest?, onLaunchHandled: () -> Uni
                     model = model,
                     onBack = { navController.popBackStack() },
                     // 打开归档里的会话走同一个会话页；返回键依次回到归档页、会话列表。
-                    onOpenSession = { navController.navigate("chat/$it") },
+                    onOpenSession = { openChat(it) },
                 )
             }
             composable("settings") {
@@ -123,7 +215,10 @@ fun DshApp(model: PhoneModel, launch: LaunchRequest?, onLaunchHandled: () -> Uni
                     onBack = { navController.popBackStack() },
                     // 发出第一条消息后这页就没用了：换成会话页，返回键直接回到列表。
                     onCreated = {
-                        navController.navigate("chat/$it") {
+                        if (wide) {
+                            detail = DetailPane.chat(it)
+                            navController.popBackStack("root", inclusive = false)
+                        } else navController.navigate("chat/$it") {
                             popUpTo("new") { inclusive = true }
                         }
                     },
@@ -135,7 +230,10 @@ fun DshApp(model: PhoneModel, launch: LaunchRequest?, onLaunchHandled: () -> Uni
                     model = model,
                     onBack = { navController.popBackStack() },
                     onCreated = {
-                        navController.navigate("chat/$it") {
+                        if (wide) {
+                            detail = DetailPane.chat(it)
+                            navController.popBackStack("root", inclusive = false)
+                        } else navController.navigate("chat/$it") {
                             popUpTo("new-automation") { inclusive = true }
                         }
                     },
@@ -148,7 +246,7 @@ fun DshApp(model: PhoneModel, launch: LaunchRequest?, onLaunchHandled: () -> Uni
                     model = model,
                     sessionId = sessionId,
                     onBack = { navController.popBackStack() },
-                    onOpenSession = { navController.navigate("chat/$it") },
+                    onOpenSession = { openChat(it) },
                 )
             }
         }

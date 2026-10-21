@@ -67,6 +67,9 @@ object Strings {
     val serverNameFooter: String get() = pick("Name this Desktop however you like; it is only shown on this device.", "给这台电脑标个名字，只在本机显示。")
     val addServer: String get() = pick("Add Server", "添加新服务")
     val noSessions: String get() = pick("No sessions yet", "还没有会话")
+    /** 宽屏并排页右侧还没选会话时的占位。 */
+    val selectSessionTitle: String get() = pick("No session selected", "未选择会话")
+    val selectSessionHint: String get() = pick("Pick a session on the left, or start a new one.", "从左侧选择一个会话，或新建一个会话。")
     /** 没有标题的会话（web `session.untitled`）。 */
     val sessionUntitled: String get() = pick("Untitled", "未命名")
     val composerPlaceholder: String get() = pick("Message…", "输入消息…")

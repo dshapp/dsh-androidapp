@@ -56,7 +56,8 @@ import kotlinx.coroutines.launch
 fun ChatScreen(
     model: PhoneModel,
     sessionId: SessionId,
-    onBack: () -> Unit,
+    /** 标题栏返回；宽屏并排页里会话就是右栏本身、无处可退，传 null 不画返回键。 */
+    onBack: (() -> Unit)?,
     onOpenSession: (SessionId) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
@@ -308,8 +309,10 @@ fun ChatScreen(
                 // 默认 64dp 标题栏在手机上太占地方：收到 52dp，标题用 titleMedium（16sp）配套。
                 expandedHeight = 52.dp,
                 navigationIcon = {
-                    IconButton(onClick = { if (finding) exitFind() else onBack() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
+                    if (finding || onBack != null) {
+                        IconButton(onClick = { if (finding) exitFind() else onBack?.invoke() }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
+                        }
                     }
                 },
                 actions = {

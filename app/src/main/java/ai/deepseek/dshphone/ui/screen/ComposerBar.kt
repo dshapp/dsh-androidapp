@@ -223,6 +223,11 @@ fun ComposerBar(
         Column(
             Modifier
                 .fillMaxWidth()
+                // 宽屏（平板、并排页右栏）与转写同宽居中：输入框不至于横跨整屏，
+                // 左右边缘也和上面的消息对齐。窄于上限的手机上等同 fillMaxWidth。
+                .wrapContentWidth(Alignment.CenterHorizontally)
+                .widthIn(max = Dimens.columnMaxWidth)
+                .fillMaxWidth()
                 .padding(horizontal = Dimens.columnInset, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {

@@ -36,7 +36,11 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -80,6 +84,8 @@ fun SessionListScreen(
     onNewSession: () -> Unit,
     onOpenArchived: () -> Unit,
     onOpenAutomations: () -> Unit = {},
+    /** 宽屏并排页右侧正在显示的会话：对应行高亮（对齐 Mac 边栏的选中态）；窄屏为 null。 */
+    selectedSessionId: SessionId? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -369,6 +375,7 @@ fun SessionListScreen(
                         items(hits, key = { it.sessionId }) { summary ->
                             SessionRow(
                                 model, summary, onOpenSession,
+                                selected = summary.sessionId == selectedSessionId,
                                 onRename = { renameText = sessionStoredTitle(summary, model.sessions[summary.sessionId]?.title); renaming = summary },
                             )
                         }
@@ -401,6 +408,7 @@ fun SessionListScreen(
                                 items(group.sessions.filter { it.running }, key = { it.sessionId }) { summary ->
                                     SessionRow(
                                         model, summary, onOpenSession,
+                                        selected = summary.sessionId == selectedSessionId,
                                         onRename = { renameText = sessionStoredTitle(summary, model.sessions[summary.sessionId]?.title); renaming = summary },
                                     )
                                 }
@@ -411,6 +419,7 @@ fun SessionListScreen(
                                 items(shown, key = { it.sessionId }) { summary ->
                                     SessionRow(
                                         model, summary, onOpenSession,
+                                        selected = summary.sessionId == selectedSessionId,
                                         onRename = { renameText = sessionStoredTitle(summary, model.sessions[summary.sessionId]?.title); renaming = summary },
                                     )
                                 }
@@ -764,9 +773,11 @@ private fun SessionRow(
     model: PhoneModel,
     summary: SessionSummary,
     onOpen: (SessionId) -> Unit,
+    selected: Boolean = false,
     onRename: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val selectedColor = MaterialTheme.colorScheme.secondaryContainer
     var menu by remember { mutableStateOf(false) }
     val pinned = model.workspaceStore.pinnedSessionIds.contains(summary.sessionId)
     val haptics = LocalHapticFeedback.current
@@ -774,7 +785,21 @@ private fun SessionRow(
     // 行上只有两种手势：点击进入会话、长按弹出操作菜单。左滑不再承载任何动作，避免误触。
     Box(Modifier.fillMaxWidth()) {
         ListItem(
-            modifier = Modifier.combinedClickable(
+            modifier = Modifier
+                // 选中态是一块左右内缩的圆角底（Mac 边栏的样子），画在 ListItem 自己的底色之下，
+                // 所以选中时把 ListItem 的底色换成透明。
+                .then(
+                    if (selected) Modifier.drawBehind {
+                        val inset = 6.dp.toPx()
+                        drawRoundRect(
+                            color = selectedColor,
+                            topLeft = Offset(inset, 0f),
+                            size = Size(size.width - inset * 2, size.height),
+                            cornerRadius = CornerRadius(10.dp.toPx()),
+                        )
+                    } else Modifier
+                )
+                .combinedClickable(
                 onClick = { onOpen(summary.sessionId) },
                 onLongClick = {
                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -785,7 +810,9 @@ private fun SessionRow(
                 Text(titleOf(model, summary), maxLines = 1, overflow = TextOverflow.Ellipsis)
             },
             leadingContent = { StatusGlyph(model, summary) },
-            trailingContent = { TrailingBadge(model, summary) },
+            trailingContent = { TrailingBadge(model, summary, selected) },
+            colors = if (selected) ListItemDefaults.colors(containerColor = Color.Transparent)
+            else ListItemDefaults.colors(),
         )
         DropdownMenu(menu, { menu = false }) {
             DropdownMenuItem(
@@ -834,14 +861,14 @@ private fun StatusGlyph(model: PhoneModel, summary: SessionSummary) {
 }
 
 @Composable
-private fun TrailingBadge(model: PhoneModel, summary: SessionSummary) {
+private fun TrailingBadge(model: PhoneModel, summary: SessionSummary, selected: Boolean) {
     val awaiting = if (model.listStore.awaitingUserSessionIds.contains(summary.sessionId)) {
         model.listStore.awaitingUserKinds[summary.sessionId] ?: SessionAwaitingKind.APPROVAL
     } else null
     when (
         val trailing = SessionRowTrailing.resolve(
             awaitingUser = awaiting,
-            isSelected = false,
+            isSelected = selected,
             isArchived = false,
             isBlank = summary.blank,
             hasDraft = model.listStore.draftSessionIds.contains(summary.sessionId),

@@ -1443,6 +1443,7 @@ class SessionStore(val sessionId: SessionId) {
                 is NodeContext.Workflow -> built.add(ChatNode.Workflow(projectWorkflow(ctx.state)))
             }
         }
+        attachSubmittedPlans(built, tools.values)
         // Streamed argument slots are preparation, never an invented dispatch/result.
         for (ctx in contexts.values) {
             val state = (ctx as? NodeContext.Assistant)?.state ?: continue
@@ -1488,6 +1489,22 @@ class SessionStore(val sessionId: SessionId) {
         keyed = applyTurnProcessFolding(keyed)
         nodes = keyed.map { it.third }
         indexRows()
+    }
+
+    /**
+     * 把每轮 `exit_plan_mode` 提交的计划（原生调用或程序里派发的子调用）交给该轮轮尾
+     * （web ui-plan 轮尾卡片）。轮尾只在 turn/end 之后成行，审批中自然不显示。
+     */
+    private fun attachSubmittedPlans(built: MutableList<ChatNode>, tools: Collection<ToolChatData>) {
+        val plans = tools.filter { it.name == "exit_plan_mode" }
+            .sortedBy { it.startSeq }
+            .mapNotNull { tool -> SubmittedPlan.parse(tool.callId, tool.argsRaw)?.let { tool.turn to it } }
+            .groupBy({ it.first }, { it.second })
+        if (plans.isEmpty()) return
+        built.replaceAll { node ->
+            if (node !is ChatNode.TurnTail) return@replaceAll node
+            plans[node.data.turn]?.let { ChatNode.TurnTail(node.data.copy(plans = it)) } ?: node
+        }
     }
 
     private fun applyTurnProcessFolding(

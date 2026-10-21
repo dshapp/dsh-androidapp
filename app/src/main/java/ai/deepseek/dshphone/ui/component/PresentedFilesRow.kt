@@ -3,6 +3,7 @@ package ai.deepseek.dshphone.ui.component
 import ai.deepseek.dshphone.i18n.Strings
 import ai.deepseek.dshphone.i18n.fmt
 import ai.deepseek.dshphone.model.PresentedFile
+import ai.deepseek.dshphone.model.SubmittedPlan
 import ai.deepseek.dshphone.model.pathBasename
 import ai.deepseek.dshphone.state.PhoneModel
 import ai.deepseek.dshphone.state.SessionStore
@@ -14,13 +15,19 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
@@ -108,6 +115,67 @@ private fun PresentedFileCard(file: PresentedFile, onOpen: () -> Unit) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+        }
+    }
+}
+
+/**
+ * 本轮提交的计划（web ui-plan `PlanCards`）：Markdown 文档图标、计划标题与「打开」，
+ * 点卡片或按钮都在详情弹层里看完整计划。
+ */
+@Composable
+fun PlanCards(plans: List<SubmittedPlan>) {
+    if (plans.isEmpty()) return
+    var opened by remember { mutableStateOf<SubmittedPlan?>(null) }
+    Column(
+        Modifier.fillMaxWidth().padding(top = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        plans.forEach { plan ->
+            OutlinedCard(
+                onClick = { opened = plan },
+                modifier = Modifier.fillMaxWidth().semantics { contentDescription = fmt(Strings.planCardOpenNamed, plan.title) },
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Row(
+                    Modifier.padding(start = 10.dp, top = 10.dp, bottom = 10.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Box(
+                        Modifier
+                            .size(40.dp)
+                            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Outlined.Description, null, Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            plan.title,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            Strings.planCardKind,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                        )
+                    }
+                    TextButton(onClick = { opened = plan }) { Text(Strings.planCardAction) }
+                }
+            }
+        }
+    }
+    opened?.let { plan ->
+        CardDetailDialog(Icons.Outlined.Description, plan.title, plan.markdown, { opened = null }) {
+            MarkdownText(plan.markdown)
         }
     }
 }

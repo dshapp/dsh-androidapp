@@ -399,6 +399,8 @@ data class TurnTailData(
     var runMs: Double? = null,
     var outcome: TurnOutcome? = null,
     var endedAt: Double? = null,
+    /** 本轮提交的计划，按调用顺序（web ui-plan 轮尾卡片）。 */
+    val plans: List<SubmittedPlan> = emptyList(),
 )
 
 enum class TurnOutcome { COMPLETED, STOPPED, FAILED }

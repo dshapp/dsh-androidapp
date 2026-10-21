@@ -794,11 +794,12 @@ private fun TurnTailRow(
     if (data.outcome == TurnOutcome.FAILED || data.outcome == TurnOutcome.STOPPED) {
         // 停止/失败已由这一轮的折叠头（「已停止」「处理失败」）说明，轮尾不再重复一行提示；
         // 与 Mac `TurnTailRow` 一样只留本轮的文件卡片（没有收尾消息就没有操作行）。
-        store?.let {
-            Column(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth()) {
+            store?.let {
                 ChangedFilesCard(model, it, data.turn)
                 PresentedFilesRow(model, it, data.turn)
             }
+            PlanCards(data.plans)
         }
         return
     }
@@ -814,6 +815,8 @@ private fun TurnTailRow(
             ChangedFilesCard(model, it, data.turn)
             PresentedFilesRow(model, it, data.turn)
         }
+        // 计划卡片排在交付卡片之后、操作行之前（web ui-plan 的 turnTail 槽位）。
+        PlanCards(data.plans)
         Row(
             Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,

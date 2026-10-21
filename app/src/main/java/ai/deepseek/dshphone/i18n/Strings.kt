@@ -269,6 +269,10 @@ object Strings {
     val presentedAll: String get() = pick("All %d files", "全部 %d 个文件")
     val presentedCollapse: String get() = pick("Collapse", "收起")
     val presentedFileKind: String get() = pick("File", "文件")
+    // 轮尾计划卡片（上游 ui-plan `preview.*`）。
+    val planCardKind: String get() = pick("Plan · Markdown", "计划 · Markdown")
+    val planCardAction: String get() = pick("Open", "打开")
+    val planCardOpenNamed: String get() = pick("Open plan: %s", "打开计划：%s")
     val reconnecting: String get() = pick("Reconnecting…", "重连中…")
     val sessionGone: String get() = pick("This session is no longer on the host.", "该会话已在主机上消失。")
     val pairingExpired: String get() = pick("Pairing expired — scan the QR code again.", "配对已失效，请重新扫描二维码。")

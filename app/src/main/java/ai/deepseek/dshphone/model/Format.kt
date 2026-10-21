@@ -338,6 +338,23 @@ object PlanModeToggle {
 
 data class PresentedFile(val seq: Int, val index: Int, val path: String, val description: String?)
 
+/**
+ * 经 `exit_plan_mode` 提交的一份计划（web ui-plan `submittedPlan`）：不论审批结果如何，
+ * 都在所在轮结束后挂成轮尾的一张卡片。
+ */
+data class SubmittedPlan(val callId: CallId, val title: String, val markdown: String) {
+    companion object {
+        private val heading = Regex("""^#\s+(\S[^\r\n]*)""")
+
+        /** 读 `plan` 参数；没有开头 `# ` 标题的计划无从显示，与 web 一样不出卡片。 */
+        fun parse(callId: CallId, argsRaw: String): SubmittedPlan? {
+            val markdown = parseArgsMap(argsRaw)?.get("plan") as? String ?: return null
+            val title = heading.find(markdown.trim())?.groupValues?.get(1) ?: return null
+            return SubmittedPlan(callId, title, markdown)
+        }
+    }
+}
+
 object TurnDeliverables {
     fun presented(seq: Int, data: JsonElement?): Pair<Int, List<PresentedFile>>? {
         val turn = data["turn"].int ?: return null

@@ -1,5 +1,6 @@
 package ai.deepseek.dshphone.ui
 
+import ai.deepseek.dshphone.AppUpdater
 import ai.deepseek.dshphone.LaunchRequest
 import ai.deepseek.dshphone.state.Connection
 import ai.deepseek.dshphone.state.PhoneModel
@@ -18,6 +19,9 @@ import ai.deepseek.dshphone.i18n.Strings
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
@@ -275,6 +279,26 @@ fun DshApp(model: PhoneModel, launch: LaunchRequest?, onLaunchHandled: () -> Uni
                 },
                 dismissButton = {
                     TextButton(onClick = { model.archiveNeedsStop = null }) { Text(Strings.cancel) }
+                },
+            )
+        }
+
+        AppUpdater.ready?.let { update ->
+            val context = LocalContext.current
+            AlertDialog(
+                onDismissRequest = { AppUpdater.later(context) },
+                title = { Text(Strings.updateReadyTitle(update.version)) },
+                text = {
+                    Text(
+                        listOf(update.notes, Strings.updateLaterHint).filter { it.isNotEmpty() }.joinToString("\n\n"),
+                        Modifier.verticalScroll(rememberScrollState()),
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { AppUpdater.installNow(context) }) { Text(Strings.updateInstallNow) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { AppUpdater.later(context) }) { Text(Strings.updateLater) }
                 },
             )
         }

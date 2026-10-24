@@ -53,6 +53,8 @@ class MainActivity : ComponentActivity() {
         if (savedInstanceState?.getBoolean(LAUNCH_HANDLED) != true) {
             launch.value = LaunchRequest.from(intent)
         }
+        // 不是重建而是重新打开：上次「下次再说」的新版本此时安装。
+        if (savedInstanceState == null) AppUpdater.onAppOpened(this)
         setContent {
             DshTheme(theme = model.settings.themeMode) {
                 DshApp(model, launch.value, onLaunchHandled = { launch.value = null })
@@ -82,6 +84,7 @@ class MainActivity : ComponentActivity() {
         //（对齐 Mac `UserNotificationRouter.onAppActivated`）。
         model.visibleSessionId?.let { notifications.sessionOpened(it) }
         model.onForeground()
+        AppUpdater.onForeground(this)
     }
 
     override fun onPause() {

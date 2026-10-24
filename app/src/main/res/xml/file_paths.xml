@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 交给系统图片查看器的图片先落在 cacheDir/shared-images，再换成 content:// 地址。
-     只暴露这一个子目录，不外泄应用其它私有数据。 -->
+<!-- 交给系统图片查看器的图片先落在 cacheDir/shared-images，App 自更新的 APK 落在
+     filesDir/updates，再换成 content:// 地址。只暴露这两个子目录，不外泄应用其它私有数据。 -->
 <paths>
     <cache-path name="shared_images" path="shared-images/" />
+    <files-path name="updates" path="updates/" />
 </paths>

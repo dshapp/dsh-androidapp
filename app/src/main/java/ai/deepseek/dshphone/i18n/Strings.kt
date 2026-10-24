@@ -325,12 +325,16 @@ object Strings {
     val fileUnavailable: String get() = pick("Couldn’t open this file", "无法打开此文件")
     /** 图片链接：取回失败，或系统里没有能看图片的应用（与附件图的 imageUnavailable 不同）。 */
     val imageOpenFailed: String get() = pick("Couldn’t open this image", "无法打开这张图片")
+    /** Markdown 里单独成段的图片读取/解码失败（web `image.failed`），后接「 · alt」。 */
+    val imagePreviewUnavailable: String get() = pick("Image preview unavailable", "图片无法预览")
     val cancel: String get() = pick("Cancel", "取消")
+    fun updateReadyTitle(version: String): String = pick("Version $version is ready", "新版本 $version 已准备好")
+    val updateInstallNow: String get() = pick("Update Now", "立即更新")
+    val updateLater: String get() = pick("Not Now", "下次再说")
+    val updateLaterHint: String get() = pick("If you choose Not Now, the update installs the next time you open the app.", "选择「下次再说」，将在你下次打开 App 时安装。")
     val done: String get() = pick("Done", "完成")
     val close: String get() = pick("Close", "关闭")
     val retry: String get() = pick("Retry", "重试")
-    /** Markdown 里单独成段的图片读取/解码失败（web `image.failed`），后接「 · alt」。 */
-    val imagePreviewUnavailable: String get() = pick("Image preview unavailable", "图片无法预览")
     val permissions: String get() = pick("Permissions", "权限")
     val sessionHasDraft: String get() = pick("Draft", "草稿")
     val sessionAwaitingApproval: String get() = pick("Approve", "待审批")

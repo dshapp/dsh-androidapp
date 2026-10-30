@@ -192,6 +192,8 @@ class StreamCoordinator(
                     put("address", addressJson)
                     putHistoryWindow(maxMessages)
                     put("assistantStream", true)
+                    // 0.2.2：让主机在后台唤起 Agent（与 Web 一致）；不带时冷会话一直 agentAvailable=false。
+                    put("activate", true)
                 })
             },
         )

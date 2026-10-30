@@ -6,7 +6,6 @@ import kotlinx.serialization.json.JsonElement
 typealias SessionId = String
 typealias MessageId = String
 typealias WorkspaceId = String
-typealias AttachmentId = String
 
 @Serializable
 data class RpcError(

@@ -9,6 +9,7 @@ import ai.deepseek.dshphone.model.GoalCreateValue
 import ai.deepseek.dshphone.model.GoalRef
 import ai.deepseek.dshphone.model.GoalViewValue
 import ai.deepseek.dshphone.model.HistoryEntry
+import ai.deepseek.dshphone.model.ImageAttachmentRef
 import ai.deepseek.dshphone.model.ModelCatalogValue
 import ai.deepseek.dshphone.model.PermissionCatalogValue
 import ai.deepseek.dshphone.model.PermissionPresetOption
@@ -233,9 +234,16 @@ suspend fun ApiClient.sessionUpdateQueue(sessionId: SessionId, itemId: MessageId
     )
 }
 
-suspend fun ApiClient.sessionAttachment(sessionId: SessionId, attachmentId: AttachmentId): SessionAttachmentValue =
-    call("session/attachment", request { put("sessionId", sessionId); put("attachmentId", attachmentId) })
-        .decodeOrNull<SessionAttachmentValue>() ?: throw internalError("attachment unavailable")
+/**
+ * 取一张会话图片的字节。0.2.2 起主机按转写里图片块原样带的完整引用（[ImageAttachmentRef]）
+ * 核对 ID、格式、字节数与尺寸后再给字节，不再接受只有 attachmentId 的旧形状；
+ * 请求是严格 schema，缺省的可选字段（name、originalDimensions）不发 null，直接省略。
+ */
+suspend fun ApiClient.sessionAttachment(sessionId: SessionId, ref: ImageAttachmentRef): SessionAttachmentValue =
+    call(
+        "session/attachment",
+        request { put("sessionId", sessionId); put("attachment", DshJson.encodeToJsonElement(ImageAttachmentRef.serializer(), ref)) },
+    ).decodeOrNull<SessionAttachmentValue>() ?: throw internalError("attachment unavailable")
 
 /**
  * 归档一条会话；返回主机落定后的完整归档集合。

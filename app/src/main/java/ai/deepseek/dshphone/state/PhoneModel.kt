@@ -1535,7 +1535,7 @@ class PhoneModel private constructor(app: Application) {
         imageCache[ref.attachmentId]?.let { return it }
         val client = api ?: return null
         return withContext(Dispatchers.IO) {
-            val value = runCatching { client.sessionAttachment(sessionId, ref.attachmentId) }.getOrNull()
+            val value = runCatching { client.sessionAttachment(sessionId, ref) }.getOrNull()
                 ?: return@withContext null
             val bytes = runCatching { Base64.decode(value.data, Base64.DEFAULT) }.getOrNull()
                 ?: return@withContext null
@@ -1554,7 +1554,7 @@ class PhoneModel private constructor(app: Application) {
     suspend fun attachmentImageFile(sessionId: SessionId, ref: ImageAttachmentRef, target: File): Boolean {
         val client = api ?: return false
         return withContext(Dispatchers.IO) {
-            val value = runCatching { client.sessionAttachment(sessionId, ref.attachmentId) }.getOrNull()
+            val value = runCatching { client.sessionAttachment(sessionId, ref) }.getOrNull()
                 ?: return@withContext false
             val bytes = runCatching { Base64.decode(value.data, Base64.DEFAULT) }.getOrNull()
             if (bytes == null || bytes.isEmpty()) return@withContext false
